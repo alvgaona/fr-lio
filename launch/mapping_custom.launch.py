@@ -47,7 +47,7 @@ def generate_launch_description():
         package='tf2_ros',
         executable='static_transform_publisher',
         arguments=['0', '0', '-0.12', '0', '0', '0',
-                   'body', 'base_link'],
+                   'imu_link', 'base_link'],
     )
 
     fast_lio_node = Node(
