@@ -631,6 +631,17 @@ void publish_odometry(const rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPt
     odomAftMapped.child_frame_id = "body";
     odomAftMapped.header.stamp = get_ros_time(lidar_end_time);
     set_posestamp(odomAftMapped.pose);
+    V3D vel_body = state_point.rot.conjugate() * state_point.vel;
+    odomAftMapped.twist.twist.linear.x = vel_body(0);
+    odomAftMapped.twist.twist.linear.y = vel_body(1);
+    odomAftMapped.twist.twist.linear.z = vel_body(2);
+    auto last_imu = Measures.imu.back();
+    V3D angvel_body(last_imu->angular_velocity.x - state_point.bg(0),
+                    last_imu->angular_velocity.y - state_point.bg(1),
+                    last_imu->angular_velocity.z - state_point.bg(2));
+    odomAftMapped.twist.twist.angular.x = angvel_body(0);
+    odomAftMapped.twist.twist.angular.y = angvel_body(1);
+    odomAftMapped.twist.twist.angular.z = angvel_body(2);
     pubOdomAftMapped->publish(odomAftMapped);
     auto P = kf.get_P();
     for (int i = 0; i < 6; i ++)
