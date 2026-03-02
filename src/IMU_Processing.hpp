@@ -23,7 +23,7 @@
 
 /// *************Preconfiguration
 
-#define MAX_INI_COUNT (10)
+#define MAX_INI_COUNT (100)
 
 const bool time_list(PointType &x, PointType &y) {return (x.curvature < y.curvature);};
 

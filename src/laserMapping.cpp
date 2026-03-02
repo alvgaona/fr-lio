@@ -143,6 +143,22 @@ geometry_msgs::msg::PoseStamped msg_body_pose;
 shared_ptr<Preprocess> p_pre(new Preprocess());
 shared_ptr<ImuProcess> p_imu(new ImuProcess());
 
+struct ImuPropState {
+    EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+    V3D pos = V3D::Zero();
+    V3D vel = V3D::Zero();
+    M3D rot = M3D::Identity();
+    V3D bg = V3D::Zero();
+    V3D ba = V3D::Zero();
+    V3D grav = V3D::Zero();
+    double pose_cov[36] = {0};
+    double timestamp = 0.0;
+    bool valid = false;
+};
+
+ImuPropState fwd_prop_anchor;
+std::mutex mtx_fwd_prop;
+
 void SigHandle(int sig)
 {
     flg_exit = true;
@@ -343,37 +359,6 @@ void livox_pcl_cbk(const livox_ros_driver2::msg::CustomMsg::UniquePtr msg)
     time_buffer.push_back(last_timestamp_lidar);
     
     s_plot11[scan_count] = omp_get_wtime() - preprocess_start_time;
-    mtx_buffer.unlock();
-    sig_buffer.notify_all();
-}
-
-void imu_cbk(const sensor_msgs::msg::Imu::UniquePtr msg_in)
-{
-    publish_count ++;
-    // cout<<"IMU got at: "<<msg_in->header.stamp.toSec()<<endl;
-    sensor_msgs::msg::Imu::SharedPtr msg(new sensor_msgs::msg::Imu(*msg_in));
-    
-
-    msg->header.stamp = get_ros_time(get_time_sec(msg_in->header.stamp) - time_diff_lidar_to_imu);
-    if (abs(timediff_lidar_wrt_imu) > 0.1 && time_sync_en)
-    {
-        msg->header.stamp = \
-        rclcpp::Time(timediff_lidar_wrt_imu + get_time_sec(msg_in->header.stamp));
-    }
-
-    double timestamp = get_time_sec(msg->header.stamp);
-
-    mtx_buffer.lock();
-
-    if (timestamp < last_timestamp_imu)
-    {
-        std::cerr << "lidar loop back, clear buffer" << std::endl;
-        imu_buffer.clear();
-    }
-
-    last_timestamp_imu = timestamp;
-
-    imu_buffer.push_back(msg);
     mtx_buffer.unlock();
     sig_buffer.notify_all();
 }
@@ -883,7 +868,37 @@ public:
         this->get_parameter_or<vector<double>>("mapping.extrinsic_T", extrinT, vector<double>());
         this->get_parameter_or<vector<double>>("mapping.extrinsic_R", extrinR, vector<double>());
 
-        RCLCPP_INFO(this->get_logger(), "p_pre->lidar_type %d", p_pre->lidar_type);
+        RCLCPP_INFO(this->get_logger(), "=== FAST-LIO Parameters ===");
+        RCLCPP_INFO(this->get_logger(), "common.lid_topic: %s", lid_topic.c_str());
+        RCLCPP_INFO(this->get_logger(), "common.imu_topic: %s", imu_topic.c_str());
+        RCLCPP_INFO(this->get_logger(), "common.time_sync_en: %d", time_sync_en);
+        RCLCPP_INFO(this->get_logger(), "common.time_offset_lidar_to_imu: %f", time_diff_lidar_to_imu);
+        RCLCPP_INFO(this->get_logger(), "preprocess.lidar_type: %d", p_pre->lidar_type);
+        RCLCPP_INFO(this->get_logger(), "preprocess.scan_line: %d", p_pre->N_SCANS);
+        RCLCPP_INFO(this->get_logger(), "preprocess.blind: %f", p_pre->blind);
+        RCLCPP_INFO(this->get_logger(), "preprocess.timestamp_unit: %d", p_pre->time_unit);
+        RCLCPP_INFO(this->get_logger(), "preprocess.scan_rate: %d", p_pre->SCAN_RATE);
+        RCLCPP_INFO(this->get_logger(), "point_filter_num: %d", p_pre->point_filter_num);
+        RCLCPP_INFO(this->get_logger(), "feature_extract_enable: %d", p_pre->feature_enabled);
+        RCLCPP_INFO(this->get_logger(), "max_iteration: %d", NUM_MAX_ITERATIONS);
+        RCLCPP_INFO(this->get_logger(), "filter_size_surf: %f", filter_size_surf_min);
+        RCLCPP_INFO(this->get_logger(), "filter_size_map: %f", filter_size_map_min);
+        RCLCPP_INFO(this->get_logger(), "cube_side_length: %f", cube_len);
+        RCLCPP_INFO(this->get_logger(), "mapping.det_range: %f", DET_RANGE);
+        RCLCPP_INFO(this->get_logger(), "mapping.fov_degree: %f", fov_deg);
+        RCLCPP_INFO(this->get_logger(), "mapping.gyr_cov: %f", gyr_cov);
+        RCLCPP_INFO(this->get_logger(), "mapping.acc_cov: %f", acc_cov);
+        RCLCPP_INFO(this->get_logger(), "mapping.b_gyr_cov: %f", b_gyr_cov);
+        RCLCPP_INFO(this->get_logger(), "mapping.b_acc_cov: %f", b_acc_cov);
+        RCLCPP_INFO(this->get_logger(), "mapping.extrinsic_est_en: %d", extrinsic_est_en);
+        RCLCPP_INFO(this->get_logger(), "mapping.extrinsic_T: [%f, %f, %f]", extrinT[0], extrinT[1], extrinT[2]);
+        RCLCPP_INFO(this->get_logger(), "publish.path_en: %d", path_en);
+        RCLCPP_INFO(this->get_logger(), "publish.scan_publish_en: %d", scan_pub_en);
+        RCLCPP_INFO(this->get_logger(), "publish.dense_publish_en: %d", dense_pub_en);
+        RCLCPP_INFO(this->get_logger(), "publish.scan_bodyframe_pub_en: %d", scan_body_pub_en);
+        RCLCPP_INFO(this->get_logger(), "pcd_save.pcd_save_en: %d", pcd_save_en);
+        RCLCPP_INFO(this->get_logger(), "runtime_pos_log_enable: %d", runtime_pos_log);
+        RCLCPP_INFO(this->get_logger(), "===========================");
 
         path.header.stamp = this->get_clock()->now();
         path.header.frame_id ="odom";
@@ -939,7 +954,9 @@ public:
         {
             sub_pcl_pc_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(lid_topic, rclcpp::SensorDataQoS(), standard_pcl_cbk);
         }
-        sub_imu_ = this->create_subscription<sensor_msgs::msg::Imu>(imu_topic, 10, imu_cbk);
+        sub_imu_ = this->create_subscription<sensor_msgs::msg::Imu>(
+            imu_topic, 10,
+            std::bind(&LaserMappingNode::imu_cbk, this, std::placeholders::_1));
         pubLaserCloudFull_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/cloud_registered", 20);
         pubLaserCloudFull_body_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/cloud_registered_body", 20);
         pubLaserCloudEffect_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/cloud_effected", 20);
@@ -1073,6 +1090,30 @@ private:
 
             double t_update_end = omp_get_wtime();
 
+            {
+                std::lock_guard<std::mutex> lock(mtx_fwd_prop);
+                fwd_prop_anchor.pos = state_point.pos;
+                fwd_prop_anchor.vel = state_point.vel;
+                fwd_prop_anchor.rot = state_point.rot.toRotationMatrix();
+                fwd_prop_anchor.bg  = state_point.bg;
+                fwd_prop_anchor.ba  = state_point.ba;
+                fwd_prop_anchor.grav = V3D(state_point.grav[0],
+                                           state_point.grav[1],
+                                           state_point.grav[2]);
+                fwd_prop_anchor.timestamp = lidar_end_time;
+                auto P = kf.get_P();
+                for (int i = 0; i < 6; i++) {
+                    int k = i < 3 ? i + 3 : i - 3;
+                    fwd_prop_anchor.pose_cov[i*6 + 0] = P(k, 3);
+                    fwd_prop_anchor.pose_cov[i*6 + 1] = P(k, 4);
+                    fwd_prop_anchor.pose_cov[i*6 + 2] = P(k, 5);
+                    fwd_prop_anchor.pose_cov[i*6 + 3] = P(k, 0);
+                    fwd_prop_anchor.pose_cov[i*6 + 4] = P(k, 1);
+                    fwd_prop_anchor.pose_cov[i*6 + 5] = P(k, 2);
+                }
+                fwd_prop_anchor.valid = true;
+            }
+
             /******* Publish odometry *******/
             publish_odometry(pubOdomAftMapped_, tf_broadcaster_);
 
@@ -1139,6 +1180,97 @@ private:
             res->success = false;
             res->message = "Map save disabled.";
         }
+    }
+
+    void imu_cbk(const sensor_msgs::msg::Imu::UniquePtr msg_in)
+    {
+        publish_count++;
+        sensor_msgs::msg::Imu::SharedPtr msg(new sensor_msgs::msg::Imu(*msg_in));
+
+        msg->header.stamp = get_ros_time(get_time_sec(msg_in->header.stamp) - time_diff_lidar_to_imu);
+        msg->linear_acceleration.x *= G_m_s2;
+        msg->linear_acceleration.y *= G_m_s2;
+        msg->linear_acceleration.z *= G_m_s2;
+        if (abs(timediff_lidar_wrt_imu) > 0.1 && time_sync_en)
+        {
+            msg->header.stamp =
+                rclcpp::Time(timediff_lidar_wrt_imu + get_time_sec(msg_in->header.stamp));
+        }
+
+        double timestamp = get_time_sec(msg->header.stamp);
+
+        mtx_buffer.lock();
+        if (timestamp < last_timestamp_imu)
+        {
+            std::cerr << "lidar loop back, clear buffer" << std::endl;
+            imu_buffer.clear();
+        }
+        last_timestamp_imu = timestamp;
+        imu_buffer.push_back(msg);
+        mtx_buffer.unlock();
+        sig_buffer.notify_all();
+
+        ImuPropState anchor;
+        {
+            std::lock_guard<std::mutex> lock(mtx_fwd_prop);
+            anchor = fwd_prop_anchor;
+        }
+        if (!anchor.valid) return;
+
+        double imu_time = get_time_sec(msg->header.stamp);
+        double dt = imu_time - anchor.timestamp;
+        if (dt <= 0.0 || dt > 0.5) return;
+
+        V3D acc_cur(msg->linear_acceleration.x, msg->linear_acceleration.y, msg->linear_acceleration.z);
+        V3D gyr_cur(msg->angular_velocity.x, msg->angular_velocity.y, msg->angular_velocity.z);
+
+        V3D omega = gyr_cur - anchor.bg;
+        V3D a_body = acc_cur - anchor.ba;
+        V3D a_world = anchor.rot * a_body + anchor.grav;
+
+        V3D prop_pos = anchor.pos + anchor.vel * dt + 0.5 * a_world * dt * dt;
+        V3D prop_vel = anchor.vel + a_world * dt;
+        M3D prop_rot = anchor.rot * Exp(omega, dt);
+
+        Eigen::Quaterniond q(prop_rot);
+        q.normalize();
+
+        nav_msgs::msg::Odometry odom;
+        odom.header.frame_id = "odom";
+        odom.child_frame_id = "imu_link";
+        odom.header.stamp = msg->header.stamp;
+        odom.pose.pose.position.x = prop_pos(0);
+        odom.pose.pose.position.y = prop_pos(1);
+        odom.pose.pose.position.z = prop_pos(2);
+        odom.pose.pose.orientation.x = q.x();
+        odom.pose.pose.orientation.y = q.y();
+        odom.pose.pose.orientation.z = q.z();
+        odom.pose.pose.orientation.w = q.w();
+        for (int i = 0; i < 36; i++)
+            odom.pose.covariance[i] = anchor.pose_cov[i];
+
+        V3D vel_body = prop_rot.transpose() * prop_vel;
+        odom.twist.twist.linear.x = vel_body(0);
+        odom.twist.twist.linear.y = vel_body(1);
+        odom.twist.twist.linear.z = vel_body(2);
+        odom.twist.twist.angular.x = omega(0);
+        odom.twist.twist.angular.y = omega(1);
+        odom.twist.twist.angular.z = omega(2);
+
+        pubOdomAftMapped_->publish(odom);
+
+        geometry_msgs::msg::TransformStamped trans;
+        trans.header.frame_id = "odom";
+        trans.child_frame_id = "imu_link";
+        trans.header.stamp = msg->header.stamp;
+        trans.transform.translation.x = prop_pos(0);
+        trans.transform.translation.y = prop_pos(1);
+        trans.transform.translation.z = prop_pos(2);
+        trans.transform.rotation.x = q.x();
+        trans.transform.rotation.y = q.y();
+        trans.transform.rotation.z = q.z();
+        trans.transform.rotation.w = q.w();
+        tf_broadcaster_->sendTransform(trans);
     }
 
 private:
