@@ -60,6 +60,7 @@ find_package(visualization_msgs REQUIRED)
 find_package(pcl_ros REQUIRED)
 find_package(pcl_conversions REQUIRED)
 find_package(livox_ros_driver2 REQUIRED)
+find_package(mocap4r2_msgs REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 
 set(dependencies
@@ -119,8 +120,12 @@ add_executable(lidar_accumulator src/lidar_accumulator.cpp)
 target_link_libraries(lidar_accumulator Python3::Python)
 ament_target_dependencies(lidar_accumulator rclcpp livox_ros_driver2)
 
+add_executable(mocap_converter src/mocap_converter.cpp)
+target_link_libraries(mocap_converter Python3::Python)
+ament_target_dependencies(mocap_converter rclcpp nav_msgs geometry_msgs mocap4r2_msgs)
+
 # ---------------- Install --------------- #
-install(TARGETS fastlio_mapping lidar_accumulator
+install(TARGETS fastlio_mapping lidar_accumulator mocap_converter
   DESTINATION lib/${PROJECT_NAME}
 )
 

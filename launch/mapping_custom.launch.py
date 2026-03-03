@@ -21,6 +21,7 @@ def generate_launch_description():
     config_file = LaunchConfiguration('config_file')
     rviz_use = LaunchConfiguration('rviz')
     rviz_cfg = LaunchConfiguration('rviz_cfg')
+    rigid_body_index = LaunchConfiguration('rigid_body_index')
 
     declare_use_sim_time_cmd = DeclareLaunchArgument(
         'use_sim_time', default_value='false',
@@ -41,6 +42,10 @@ def generate_launch_description():
     declare_rviz_config_path_cmd = DeclareLaunchArgument(
         'rviz_cfg', default_value=default_rviz_config_path,
         description='RViz config file path'
+    )
+    declare_rigid_body_index_cmd = DeclareLaunchArgument(
+        'rigid_body_index', default_value='91',
+        description='Mocap rigid body index'
     )
 
     lidar_accumulator_node = Node(
@@ -68,6 +73,17 @@ def generate_launch_description():
                     {'use_sim_time': use_sim_time}],
         output='screen'
     )
+    mocap_converter_node = Node(
+        package='fast_lio',
+        executable='mocap_converter',
+        parameters=[{
+            'rigid_body_index': rigid_body_index,
+            'mocap_topic': '/mocap/rigid_bodies',
+            'odom_frame': 'map',
+        }],
+        output='screen'
+    )
+
     rviz_node = Node(
         package='rviz2',
         executable='rviz2',
@@ -81,10 +97,12 @@ def generate_launch_description():
     ld.add_action(declare_config_file_cmd)
     ld.add_action(declare_rviz_cmd)
     ld.add_action(declare_rviz_config_path_cmd)
+    ld.add_action(declare_rigid_body_index_cmd)
 
     ld.add_action(lidar_accumulator_node)
     ld.add_action(livox_imu_to_base_link)
     ld.add_action(fast_lio_node)
+    ld.add_action(mocap_converter_node)
     ld.add_action(rviz_node)
 
     return ld
