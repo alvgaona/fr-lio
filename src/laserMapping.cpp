@@ -1214,6 +1214,11 @@ private:
         P_pose(4,4) += gyr_noise;
         P_pose(5,5) += gyr_noise;
 
+        M3D R = anchor.rot;
+        P_pose.block<3,3>(3, 3) = R * P_pose.block<3,3>(3, 3) * R.transpose();
+        P_pose.block<3,3>(0, 3) = P_pose.block<3,3>(0, 3) * R.transpose();
+        P_pose.block<3,3>(3, 0) = R * P_pose.block<3,3>(3, 0);
+
         for (int i = 0; i < 6; i++) {
             for (int j = 0; j < 6; j++) {
                 odom.pose.covariance[i * 6 + j] = P_pose(i, j);

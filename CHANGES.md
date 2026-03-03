@@ -113,9 +113,16 @@ propagates the last EKF-corrected state forward and immediately publishes the pr
 
 **Architecture**:
 ```
-Timer thread (10Hz):  EKF correction with LiDAR scan -> snapshot anchor state (x_anchor, t_anchor)
+100Hz polling timer:  sync_packages() waits for complete LiDAR+IMU data
+                      -> EKF correction -> snapshot anchor state (x_anchor, P_anchor, t_anchor)
 IMU callback (200Hz): read anchor -> propagate with new IMU -> publish odometry + TF + path
 ```
+
+The timer runs at 100Hz but `sync_packages()` only proceeds when a full LiDAR scan (with covering
+IMU data) is available, making the effective correction rate equal to the LiDAR scan rate (~10Hz
+with accumulation). The IMU callback is the **sole publisher** of odometry, TF, and path — the scan
+processing only updates the anchor state. This eliminates duplicate timestamps that occurred when
+both the scan processing and IMU callback published to `/odom`.
 
 **Anchor state**: After each EKF correction, the full corrected state is snapshotted into an
 `ImuPropState` struct protected by a mutex:
@@ -124,11 +131,14 @@ IMU callback (200Hz): read anchor -> propagate with new IMU -> publish odometry 
 struct ImuPropState {
     V3D pos, vel, bg, ba, grav;
     M3D rot;
-    double pose_cov[36];
+    Eigen::Matrix<double, 23, 23> P;
     double timestamp;
     bool valid;
 };
 ```
+
+The full 23x23 EKF covariance `P` is stored (not just the 6x6 pose block) because the forward
+propagation Jacobian maps from the full error state to the 6-DOF pose error.
 
 **Forward propagation math**: For each incoming IMU sample at time `t_imu` with measurements
 `(a_imu, omega_imu)`, compute `dt = t_imu - t_anchor` and propagate:
@@ -275,20 +285,23 @@ P_pose(dt) = J(dt) * P_anchor * J(dt)^T + N(dt)
 ```
 
 Where `P_anchor` is the full 23x23 EKF covariance from the last LiDAR correction, and `N(dt)` is
-the IMU measurement noise contribution:
+the cumulative IMU measurement noise contribution modeled consistently with the EKF's per-step
+noise:
 
 ```
-        [σ_a² * I₃ * dt⁴/4    0₃ₓ₃              ]
-N(dt) = [                                         ]
-        [0₃ₓ₃                  σ_g² * I₃ * dt²    ]
+n_samples = round(dt / 0.005)              (number of 200Hz IMU samples in interval)
+sample_dt = dt / n_samples                 (actual per-sample interval)
+
+N_pos = acc_cov * sample_dt * dt³ / 3      (position noise, added to diagonal 0:3)
+N_rot = n_samples * sample_dt² * gyr_cov   (rotation noise, added to diagonal 3:6)
 ```
 
-The position noise `σ_a² * dt⁴/4` comes from double-integrating white accelerometer noise over
-time `dt`: `Var(∫∫ n_a dt²) = σ_a² * dt⁴/4`. The rotation noise `σ_g² * dt²` comes from
-single-integrating white gyroscope noise: `Var(∫ n_g dt) = σ_g² * dt²`.
+This cumulative model sums `n_samples` independent per-step noise contributions rather than
+computing a single-step noise over the full `dt`. The position noise accumulates as `O(dt³)` (from
+double-integrating `n_samples` independent acceleration noise samples) and the rotation noise as
+`O(dt)` (from single-integrating `n_samples` independent gyro noise samples).
 
-The values `σ_a² = acc_cov` and `σ_g² = gyr_cov` are the same noise parameters used in the EKF's
-process noise matrix Q (configured as `mapping.acc_cov` and `mapping.gyr_cov`).
+The values `acc_cov` and `gyr_cov` are configured as `mapping.acc_cov` and `mapping.gyr_cov`.
 
 #### Why This Matters for Flight Control
 
@@ -325,18 +338,33 @@ Per IMU sample: one 6x23 * 23x23 matrix multiply (3174 FMAs) + one 6x23 * 23x6 m
 = ~4000 FLOPs at 200Hz = **0.8 MFLOPS**. Negligible compared to the EKF update (~23³ ≈ 12000 FLOPs
 per iteration, 3 iterations, plus point matching).
 
-#### Output Remapping
+#### Output Remapping and Frame Rotation
 
-The P_pose matrix has ordering `[pos(0:2), rot(3:5)]`. The ROS `PoseWithCovariance` message uses
-the same convention, but the existing FAST-LIO code swaps position and rotation rows/columns when
-writing to the covariance array. We maintain this same remapping for consistency with the upstream
-code:
+The upstream FAST-LIO code swaps position and rotation blocks when writing to the ROS covariance
+array using `k = i < 3 ? i + 3 : i - 3`. This is a bug — the ROS `PoseWithCovariance` message
+uses `[x, y, z, rot_x, rot_y, rot_z]` ordering, which matches our `P_pose` ordering
+`[pos(0:2), rot(3:5)]` directly. We write `P_pose(i, j)` without remapping.
 
-```cpp
-int k = i < 3 ? i + 3 : i - 3;   // swap pos ↔ rot rows
-covariance[i*6 + 0..2] = P_pose(k, 3..5);   // swap pos ↔ rot cols
-covariance[i*6 + 3..5] = P_pose(k, 0..2);
+The IEKF uses right perturbation (`R_true = R_est * Exp(δθ)`), so the rotation error `δθ` is in
+the body frame. The ROS convention expects `pose.covariance` in the `header.frame_id` (odom)
+frame. We rotate the rotation block and cross terms to odom frame:
+
 ```
+δθ_odom = R * δθ_body
+
+P_odom = T * P_pose * T^T,   where T = diag(I₃, R)
+```
+
+In code:
+```cpp
+M3D R = anchor.rot;
+P_pose.block<3,3>(3, 3) = R * P_pose.block<3,3>(3, 3) * R.transpose();
+P_pose.block<3,3>(0, 3) = P_pose.block<3,3>(0, 3) * R.transpose();
+P_pose.block<3,3>(3, 0) = R * P_pose.block<3,3>(3, 0);
+```
+
+The isotropic cumulative noise (`σ²I`) is invariant under rotation, so it can be added before
+or after the frame rotation.
 
 **Edge cases handled**:
 - Before EKF initialization: `anchor.valid == false`, early return
@@ -350,7 +378,9 @@ covariance[i*6 + 3..5] = P_pose(k, 0..2);
   - Moved `imu_cbk` from free function into `LaserMappingNode` class to access publishers
   - After each EKF update, snapshots corrected state into `fwd_prop_anchor` (mutex-protected)
   - In `imu_cbk`, propagates from anchor and publishes odometry, TF, and path
-  - Removed `publish_odometry()` and `publish_path()` from timer callback to avoid duplicates
+  - Emptied `publish_odometry()` — IMU callback is the sole publisher of odom and TF
+  - Increased IMU subscription queue from 10 to 200 to prevent message drops when scan
+    processing blocks the single-threaded executor
 
 ### 2. LiDAR Scan Accumulator Node
 
@@ -531,10 +561,40 @@ configuration verification.
 **Files modified**:
 - `src/laserMapping.cpp`: After parameter loading in `LaserMappingNode` constructor
 
-### 11. Minor Changes
+### 11. Mocap Ground Truth Converter Node
+
+**Problem**: For trajectory evaluation with `evo`, we need ground truth from a motion capture system
+published as standard ROS odometry and path messages.
+
+**Solution**: Added a standalone `mocap_converter` node that subscribes to
+`mocap4r2_msgs/msg/RigidBodies` and publishes:
+- `nav_msgs/Odometry` on `/ground_truth/odom`
+- `nav_msgs/Path` on `/ground_truth/path` (accumulated poses)
+
+The node matches rigid bodies by name (not array index) via the `rigid_body_name` parameter. This
+avoids confusion between the mocap system's internal ID and the array position.
+
+**Parameters**:
+
+| Parameter          | Type   | Default               | Description                   |
+|--------------------|--------|-----------------------|-------------------------------|
+| `rigid_body_name`  | string | `""`                  | Name to match (empty = first) |
+| `mocap_topic`      | string | `/mocap/rigid_bodies`  | Input topic                   |
+| `odom_frame`       | string | `map`                 | Parent frame for ground truth |
+
+**Files added**:
+- `src/mocap_converter.cpp`
+
+**Files modified**:
+- `CMakeLists.txt`: Added `mocap4r2_msgs` dependency and `mocap_converter` build target
+- `launch/mapping_custom.launch.py`: Added `mocap_converter` node with `rigid_body_name` launch
+  argument (default `"91"`, forced to string type via `ParameterValue` to prevent YAML integer
+  parsing)
+
+### 12. Minor Changes
 
 - **C++17**: Changed from C++14 to C++17 (`CMakeLists.txt`)
 - **PCD saving**: Disabled by default (`config/mid360.yaml`)
 - **RViz config**: Updated frame names, topic names, and display settings (`rviz/fastlio.rviz`)
-- **Empty IMU guard**: Added check for empty `Measures.imu` deque before calling `.back()` to prevent
-  segfault (`src/laserMapping.cpp`)
+- **Empty IMU guard**: Added check for empty `Measures.imu` deque before calling `.back()` to
+  prevent segfault (`src/laserMapping.cpp`)
