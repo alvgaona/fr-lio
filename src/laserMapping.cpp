@@ -633,13 +633,10 @@ void publish_odometry(const rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPt
     auto P = kf.get_P();
     for (int i = 0; i < 6; i ++)
     {
-        int k = i < 3 ? i + 3 : i - 3;
-        odomAftMapped.pose.covariance[i*6 + 0] = P(k, 3);
-        odomAftMapped.pose.covariance[i*6 + 1] = P(k, 4);
-        odomAftMapped.pose.covariance[i*6 + 2] = P(k, 5);
-        odomAftMapped.pose.covariance[i*6 + 3] = P(k, 0);
-        odomAftMapped.pose.covariance[i*6 + 4] = P(k, 1);
-        odomAftMapped.pose.covariance[i*6 + 5] = P(k, 2);
+        for (int j = 0; j < 6; j++)
+        {
+            odomAftMapped.pose.covariance[i * 6 + j] = P(i, j);
+        }
     }
 
     geometry_msgs::msg::TransformStamped trans;
@@ -1244,9 +1241,11 @@ private:
 
         Eigen::Matrix<double, 6, 6> P_pose = J * anchor.P * J.transpose();
 
-        double dt2 = dt * dt;
-        double acc_noise = acc_cov * 0.25 * dt2 * dt2;
-        double gyr_noise = gyr_cov * dt2;
+        constexpr double imu_dt = 0.005;
+        int n_samples = std::max(1, static_cast<int>(std::round(dt / imu_dt)));
+        double sample_dt = dt / n_samples;
+        double gyr_noise = n_samples * sample_dt * sample_dt * gyr_cov;
+        double acc_noise = acc_cov * sample_dt * dt * dt * dt / 3.0;
         P_pose(0,0) += acc_noise;
         P_pose(1,1) += acc_noise;
         P_pose(2,2) += acc_noise;
@@ -1255,13 +1254,9 @@ private:
         P_pose(5,5) += gyr_noise;
 
         for (int i = 0; i < 6; i++) {
-            int k = i < 3 ? i + 3 : i - 3;
-            odom.pose.covariance[i*6 + 0] = P_pose(k, 3);
-            odom.pose.covariance[i*6 + 1] = P_pose(k, 4);
-            odom.pose.covariance[i*6 + 2] = P_pose(k, 5);
-            odom.pose.covariance[i*6 + 3] = P_pose(k, 0);
-            odom.pose.covariance[i*6 + 4] = P_pose(k, 1);
-            odom.pose.covariance[i*6 + 5] = P_pose(k, 2);
+            for (int j = 0; j < 6; j++) {
+                odom.pose.covariance[i * 6 + j] = P_pose(i, j);
+            }
         }
 
         V3D vel_body = prop_rot.transpose() * prop_vel;
