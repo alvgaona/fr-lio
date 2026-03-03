@@ -610,47 +610,8 @@ void set_posestamp(T & out)
     
 }
 
-void publish_odometry(const rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pubOdomAftMapped, std::unique_ptr<tf2_ros::TransformBroadcaster> & tf_br)
+void publish_odometry(const rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr /*pubOdomAftMapped*/, std::unique_ptr<tf2_ros::TransformBroadcaster> & /*tf_br*/)
 {
-    odomAftMapped.header.frame_id = "odom";
-    odomAftMapped.child_frame_id = "imu_link";
-    odomAftMapped.header.stamp = get_ros_time(lidar_end_time);
-    set_posestamp(odomAftMapped.pose);
-    V3D vel_body = state_point.rot.conjugate() * state_point.vel;
-    odomAftMapped.twist.twist.linear.x = vel_body(0);
-    odomAftMapped.twist.twist.linear.y = vel_body(1);
-    odomAftMapped.twist.twist.linear.z = vel_body(2);
-    if (!Measures.imu.empty()) {
-        auto last_imu = Measures.imu.back();
-        V3D angvel_body(last_imu->angular_velocity.x - state_point.bg(0),
-                        last_imu->angular_velocity.y - state_point.bg(1),
-                        last_imu->angular_velocity.z - state_point.bg(2));
-        odomAftMapped.twist.twist.angular.x = angvel_body(0);
-        odomAftMapped.twist.twist.angular.y = angvel_body(1);
-        odomAftMapped.twist.twist.angular.z = angvel_body(2);
-    }
-    pubOdomAftMapped->publish(odomAftMapped);
-    auto P = kf.get_P();
-    for (int i = 0; i < 6; i ++)
-    {
-        for (int j = 0; j < 6; j++)
-        {
-            odomAftMapped.pose.covariance[i * 6 + j] = P(i, j);
-        }
-    }
-
-    geometry_msgs::msg::TransformStamped trans;
-    trans.header.frame_id = "odom";
-    trans.child_frame_id = "imu_link";
-    trans.header.stamp = get_ros_time(lidar_end_time);
-    trans.transform.translation.x = odomAftMapped.pose.pose.position.x;
-    trans.transform.translation.y = odomAftMapped.pose.pose.position.y;
-    trans.transform.translation.z = odomAftMapped.pose.pose.position.z;
-    trans.transform.rotation.w = odomAftMapped.pose.pose.orientation.w;
-    trans.transform.rotation.x = odomAftMapped.pose.pose.orientation.x;
-    trans.transform.rotation.y = odomAftMapped.pose.pose.orientation.y;
-    trans.transform.rotation.z = odomAftMapped.pose.pose.orientation.z;
-    tf_br->sendTransform(trans);
 }
 
 void publish_path(rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pubPath)

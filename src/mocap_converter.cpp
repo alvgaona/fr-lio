@@ -9,16 +9,16 @@ class MocapConverter : public rclcpp::Node
 public:
     MocapConverter() : Node("mocap_converter")
     {
-        this->declare_parameter<int>("rigid_body_index", 0);
+        this->declare_parameter<std::string>("rigid_body_name", "");
         this->declare_parameter<std::string>("mocap_topic", "/mocap/rigid_bodies");
         this->declare_parameter<std::string>("odom_frame", "map");
 
-        rigid_body_index_ = this->get_parameter("rigid_body_index").as_int();
+        rigid_body_name_ = this->get_parameter("rigid_body_name").as_string();
         auto mocap_topic = this->get_parameter("mocap_topic").as_string();
         odom_frame_ = this->get_parameter("odom_frame").as_string();
 
-        RCLCPP_INFO(this->get_logger(), "Mocap converter: rigid_body_index=%d, topic='%s', frame='%s'",
-                     rigid_body_index_, mocap_topic.c_str(), odom_frame_.c_str());
+        RCLCPP_INFO(this->get_logger(), "Mocap converter: rigid_body_name='%s', topic='%s', frame='%s'",
+                     rigid_body_name_.c_str(), mocap_topic.c_str(), odom_frame_.c_str());
 
         sub_ = this->create_subscription<mocap4r2_msgs::msg::RigidBodies>(
             mocap_topic, 10,
@@ -33,26 +33,37 @@ public:
 private:
     void callback(const mocap4r2_msgs::msg::RigidBodies::SharedPtr msg)
     {
-        if (rigid_body_index_ >= static_cast<int>(msg->rigidbodies.size())) {
-            RCLCPP_WARN_ONCE(this->get_logger(), "Rigid body index %d out of range (size: %zu)",
-                             rigid_body_index_, msg->rigidbodies.size());
-            return;
+        const mocap4r2_msgs::msg::RigidBody* body = nullptr;
+
+        if (rigid_body_name_.empty()) {
+            if (msg->rigidbodies.empty()) return;
+            body = &msg->rigidbodies[0];
+        } else {
+            for (const auto& rb : msg->rigidbodies) {
+                if (rb.rigid_body_name == rigid_body_name_) {
+                    body = &rb;
+                    break;
+                }
+            }
+            if (!body) {
+                RCLCPP_WARN_ONCE(this->get_logger(), "Rigid body '%s' not found", rigid_body_name_.c_str());
+                return;
+            }
         }
 
-        const auto& pose = msg->rigidbodies.at(rigid_body_index_).pose;
         auto stamp = msg->header.stamp;
 
         nav_msgs::msg::Odometry odom;
         odom.header.stamp = stamp;
         odom.header.frame_id = odom_frame_;
         odom.child_frame_id = "ground_truth";
-        odom.pose.pose = pose;
+        odom.pose.pose = body->pose;
         odom_pub_->publish(odom);
 
         geometry_msgs::msg::PoseStamped pose_stamped;
         pose_stamped.header.stamp = stamp;
         pose_stamped.header.frame_id = odom_frame_;
-        pose_stamped.pose = pose;
+        pose_stamped.pose = body->pose;
         path_msg_.poses.push_back(pose_stamped);
         path_msg_.header.stamp = stamp;
         path_pub_->publish(path_msg_);
@@ -63,7 +74,7 @@ private:
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_pub_;
     nav_msgs::msg::Path path_msg_;
     std::string odom_frame_;
-    int rigid_body_index_ = 0;
+    std::string rigid_body_name_;
 };
 
 int main(int argc, char **argv)
