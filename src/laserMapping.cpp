@@ -1114,16 +1114,12 @@ private:
                 fwd_prop_anchor.valid = true;
             }
 
-            /******* Publish odometry *******/
-            publish_odometry(pubOdomAftMapped_, tf_broadcaster_);
-
             /*** add the feature points to map kdtree ***/
             t3 = omp_get_wtime();
             map_incremental();
             t5 = omp_get_wtime();
             
             /******* Publish points *******/
-            if (path_en)                         publish_path(pubPath_);
             if (scan_pub_en)      publish_frame_world(pubLaserCloudFull_);
             if (scan_pub_en && scan_body_pub_en) publish_frame_body(pubLaserCloudFull_body_);
             if (effect_pub_en) publish_effect_world(pubLaserCloudEffect_);
@@ -1271,6 +1267,21 @@ private:
         trans.transform.rotation.z = q.z();
         trans.transform.rotation.w = q.w();
         tf_broadcaster_->sendTransform(trans);
+
+        if (path_en) {
+            geometry_msgs::msg::PoseStamped pose;
+            pose.header.stamp = msg->header.stamp;
+            pose.header.frame_id = "odom";
+            pose.pose.position.x = prop_pos(0);
+            pose.pose.position.y = prop_pos(1);
+            pose.pose.position.z = prop_pos(2);
+            pose.pose.orientation.x = q.x();
+            pose.pose.orientation.y = q.y();
+            pose.pose.orientation.z = q.z();
+            pose.pose.orientation.w = q.w();
+            path.poses.push_back(pose);
+            pubPath_->publish(path);
+        }
     }
 
 private:

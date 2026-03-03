@@ -43,6 +43,17 @@ def generate_launch_description():
         description='RViz config file path'
     )
 
+    lidar_accumulator_node = Node(
+        package='fast_lio',
+        executable='lidar_accumulator',
+        parameters=[{
+            'accumulate_count': 10,
+            'input_topic': '/livox/lidar',
+            'output_topic': '/livox/lidar_accumulated',
+        }],
+        output='screen'
+    )
+
     livox_imu_to_base_link = Node(
         package='tf2_ros',
         executable='static_transform_publisher',
@@ -71,6 +82,7 @@ def generate_launch_description():
     ld.add_action(declare_rviz_cmd)
     ld.add_action(declare_rviz_config_path_cmd)
 
+    ld.add_action(lidar_accumulator_node)
     ld.add_action(livox_imu_to_base_link)
     ld.add_action(fast_lio_node)
     ld.add_action(rviz_node)

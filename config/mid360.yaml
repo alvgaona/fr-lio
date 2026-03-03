@@ -10,7 +10,7 @@
         map_file_path: "./test.pcd"
 
         common:
-            lid_topic:  "/livox/lidar"
+            lid_topic:  "/livox/lidar_accumulated"
             imu_topic:  "/livox/imu"
             time_sync_en: false         # ONLY turn on when external time synchronization is really not possible
             time_offset_lidar_to_imu: 0.0 # Time offset between lidar and IMU calibrated by other algorithms, e.g. LI-Init (can be found in README).
@@ -21,7 +21,7 @@
             scan_line:  4
             blind: 0.5
             timestamp_unit: 3
-            scan_rate: 100
+            scan_rate: 10
 
         mapping:
             acc_cov: 0.1

@@ -44,6 +44,7 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${OpenMP_CXX_FLAGS}")
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS}   ${OpenMP_C_FLAGS}")
 
 find_package(PythonLibs REQUIRED)
+find_package(Python3 REQUIRED COMPONENTS Development)
 find_path(MATPLOTLIB_CPP_INCLUDE_DIRS "matplotlibcpp.h")
 
 # ROS dependencies
@@ -114,8 +115,12 @@ endif()
 
 ament_target_dependencies(fastlio_mapping ${dependencies})
 
+add_executable(lidar_accumulator src/lidar_accumulator.cpp)
+target_link_libraries(lidar_accumulator Python3::Python)
+ament_target_dependencies(lidar_accumulator rclcpp livox_ros_driver2)
+
 # ---------------- Install --------------- #
-install(TARGETS fastlio_mapping
+install(TARGETS fastlio_mapping lidar_accumulator
   DESTINATION lib/${PROJECT_NAME}
 )
 
