@@ -151,7 +151,7 @@ struct ImuPropState {
     V3D bg = V3D::Zero();
     V3D ba = V3D::Zero();
     V3D grav = V3D::Zero();
-    double pose_cov[36] = {0};
+    Eigen::Matrix<double, 23, 23> P = Eigen::Matrix<double, 23, 23>::Zero();
     double timestamp = 0.0;
     bool valid = false;
 };
@@ -1101,16 +1101,7 @@ private:
                                            state_point.grav[1],
                                            state_point.grav[2]);
                 fwd_prop_anchor.timestamp = lidar_end_time;
-                auto P = kf.get_P();
-                for (int i = 0; i < 6; i++) {
-                    int k = i < 3 ? i + 3 : i - 3;
-                    fwd_prop_anchor.pose_cov[i*6 + 0] = P(k, 3);
-                    fwd_prop_anchor.pose_cov[i*6 + 1] = P(k, 4);
-                    fwd_prop_anchor.pose_cov[i*6 + 2] = P(k, 5);
-                    fwd_prop_anchor.pose_cov[i*6 + 3] = P(k, 0);
-                    fwd_prop_anchor.pose_cov[i*6 + 4] = P(k, 1);
-                    fwd_prop_anchor.pose_cov[i*6 + 5] = P(k, 2);
-                }
+                fwd_prop_anchor.P = kf.get_P();
                 fwd_prop_anchor.valid = true;
             }
 
@@ -1242,8 +1233,36 @@ private:
         odom.pose.pose.orientation.y = q.y();
         odom.pose.pose.orientation.z = q.z();
         odom.pose.pose.orientation.w = q.w();
-        for (int i = 0; i < 36; i++)
-            odom.pose.covariance[i] = anchor.pose_cov[i];
+
+        Eigen::Matrix<double, 6, 23> J = Eigen::Matrix<double, 6, 23>::Zero();
+        J.block<3,3>(0, 0) = M3D::Identity();
+        J.block<3,3>(0, 3) = -anchor.rot * skew_sym_mat(a_body) * 0.5 * dt * dt;
+        J.block<3,3>(0, 12) = M3D::Identity() * dt;
+        J.block<3,3>(0, 18) = -anchor.rot * 0.5 * dt * dt;
+        J.block<3,3>(3, 3) = M3D::Identity();
+        J.block<3,3>(3, 15) = -M3D::Identity() * dt;
+
+        Eigen::Matrix<double, 6, 6> P_pose = J * anchor.P * J.transpose();
+
+        double dt2 = dt * dt;
+        double acc_noise = acc_cov * 0.25 * dt2 * dt2;
+        double gyr_noise = gyr_cov * dt2;
+        P_pose(0,0) += acc_noise;
+        P_pose(1,1) += acc_noise;
+        P_pose(2,2) += acc_noise;
+        P_pose(3,3) += gyr_noise;
+        P_pose(4,4) += gyr_noise;
+        P_pose(5,5) += gyr_noise;
+
+        for (int i = 0; i < 6; i++) {
+            int k = i < 3 ? i + 3 : i - 3;
+            odom.pose.covariance[i*6 + 0] = P_pose(k, 3);
+            odom.pose.covariance[i*6 + 1] = P_pose(k, 4);
+            odom.pose.covariance[i*6 + 2] = P_pose(k, 5);
+            odom.pose.covariance[i*6 + 3] = P_pose(k, 0);
+            odom.pose.covariance[i*6 + 4] = P_pose(k, 1);
+            odom.pose.covariance[i*6 + 5] = P_pose(k, 2);
+        }
 
         V3D vel_body = prop_rot.transpose() * prop_vel;
         odom.twist.twist.linear.x = vel_body(0);
