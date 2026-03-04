@@ -6,11 +6,8 @@ Panels:
       Expanded:
         - /Global Options1
         - /Status1
-        - /TF1
-        - /Odometry1
-        - /Path1
-        - /CloudRegistered1
-        - /CloudEffected1
+        - /TF1/Tree1
+        - /TF1/Tree1/odom1
       Splitter Ratio: 0.5
     Tree Height: 555
   - Class: rviz_common/Selection
@@ -30,7 +27,7 @@ Panels:
     Experimental: false
     Name: Time
     SyncMode: 0
-    SyncSource: CloudEffected
+    SyncSource: CloudRegistered
 Visualization Manager:
   Class: ""
   Displays:
@@ -127,8 +124,8 @@ Visualization Manager:
     - Alpha: 1
       Autocompute Intensity Bounds: true
       Autocompute Value Bounds:
-        Max Value: 13.473834037780762
-        Min Value: 0.10858750343322754
+        Max Value: 1.9867992401123047
+        Min Value: -1.64910089969635
         Value: true
       Axis: Z
       Channel Name: intensity
@@ -287,10 +284,10 @@ Visualization Manager:
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Pitch: 0.3897971510887146
+      Pitch: 0.16979722678661346
       Target Frame: <Fixed Frame>
       Value: Orbit (rviz_default_plugins)
-      Yaw: 0.3067367672920227
+      Yaw: 1.0067362785339355
     Saved: ~
 Window Geometry:
   Displays:
