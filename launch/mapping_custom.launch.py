@@ -23,6 +23,8 @@ def generate_launch_description():
     rviz_use = LaunchConfiguration('rviz')
     rviz_cfg = LaunchConfiguration('rviz_cfg')
     rigid_body_name = LaunchConfiguration('rigid_body_name')
+    namespace = LaunchConfiguration('namespace')
+    mocap_use = LaunchConfiguration('mocap')
 
     declare_use_sim_time_cmd = DeclareLaunchArgument(
         'use_sim_time', default_value='false',
@@ -48,10 +50,19 @@ def generate_launch_description():
         'rigid_body_name', default_value='91',
         description='Mocap rigid body name'
     )
+    declare_namespace_cmd = DeclareLaunchArgument(
+        'namespace', default_value='',
+        description='Namespace for all nodes and topics'
+    )
+    declare_mocap_cmd = DeclareLaunchArgument(
+        'mocap', default_value='false',
+        description='Launch mocap converter node'
+    )
 
     lidar_accumulator_node = Node(
         package='fast_lio',
         executable='lidar_accumulator',
+        namespace=namespace,
         parameters=[{
             'accumulate_count': 10,
             'input_topic': '/livox/lidar',
@@ -63,26 +74,32 @@ def generate_launch_description():
     livox_imu_to_base_link = Node(
         package='tf2_ros',
         executable='static_transform_publisher',
-        arguments=['0', '0', '-0.12', '0', '0', '0',
-                   'imu_link', 'base_link'],
+        namespace=namespace,
+        arguments=['--frame-id', 'imu_link',
+                   '--child-frame-id', 'base_link',
+                   '--z', '-0.12'],
     )
 
     fast_lio_node = Node(
         package='fast_lio',
         executable='fastlio_mapping',
+        namespace=namespace,
         parameters=[PathJoinSubstitution([config_path, config_file]),
                     {'use_sim_time': use_sim_time}],
         output='screen'
     )
+
     mocap_converter_node = Node(
         package='fast_lio',
         executable='mocap_converter',
+        namespace=namespace,
         parameters=[{
             'rigid_body_name': ParameterValue(rigid_body_name, value_type=str),
             'mocap_topic': '/mocap/rigid_bodies',
-            'odom_frame': 'map',
+            'odom_frame': 'odom',
         }],
-        output='screen'
+        output='screen',
+        condition=IfCondition(mocap_use)
     )
 
     rviz_node = Node(
@@ -99,6 +116,8 @@ def generate_launch_description():
     ld.add_action(declare_rviz_cmd)
     ld.add_action(declare_rviz_config_path_cmd)
     ld.add_action(declare_rigid_body_name_cmd)
+    ld.add_action(declare_namespace_cmd)
+    ld.add_action(declare_mocap_cmd)
 
     ld.add_action(lidar_accumulator_node)
     ld.add_action(livox_imu_to_base_link)

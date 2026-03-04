@@ -478,126 +478,6 @@ void map_incremental()
 
 PointCloudXYZI::Ptr pcl_wait_pub(new PointCloudXYZI());
 PointCloudXYZI::Ptr pcl_wait_save(new PointCloudXYZI());
-void publish_frame_world(rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubLaserCloudFull)
-{
-    if(scan_pub_en)
-    {
-        PointCloudXYZI::Ptr laserCloudFullRes(dense_pub_en ? feats_undistort : feats_down_body);
-        int size = laserCloudFullRes->points.size();
-        PointCloudXYZI::Ptr laserCloudWorld( \
-                        new PointCloudXYZI(size, 1));
-
-        for (int i = 0; i < size; i++)
-        {
-            RGBpointBodyToWorld(&laserCloudFullRes->points[i], \
-                                &laserCloudWorld->points[i]);
-        }
-
-        sensor_msgs::msg::PointCloud2 laserCloudmsg;
-        pcl::toROSMsg(*laserCloudWorld, laserCloudmsg);
-        // laserCloudmsg.header.stamp = ros::Time().fromSec(lidar_end_time);
-        laserCloudmsg.header.stamp = get_ros_time(lidar_end_time);
-        laserCloudmsg.header.frame_id = "odom";
-        pubLaserCloudFull->publish(laserCloudmsg);
-        publish_count -= PUBFRAME_PERIOD;
-    }
-
-    /**************** save map ****************/
-    /* 1. make sure you have enough memories
-    /* 2. noted that pcd save will influence the real-time performences **/
-    /*
-    if (pcd_save_en)
-    {
-        int size = feats_undistort->points.size();
-        PointCloudXYZI::Ptr laserCloudWorld( \
-                        new PointCloudXYZI(size, 1));
-
-        for (int i = 0; i < size; i++)
-        {
-            RGBpointBodyToWorld(&feats_undistort->points[i], \
-                                &laserCloudWorld->points[i]);
-        }
-        *pcl_wait_save += *laserCloudWorld;
-
-        static int scan_wait_num = 0;
-        scan_wait_num ++;
-        if (pcl_wait_save->size() > 0 && pcd_save_interval > 0  && scan_wait_num >= pcd_save_interval)
-        {
-            pcd_index ++;
-            string all_points_dir(string(string(ROOT_DIR) + "PCD/scans_") + to_string(pcd_index) + string(".pcd"));
-            pcl::PCDWriter pcd_writer;
-            cout << "current scan saved to /PCD/" << all_points_dir << endl;
-            pcd_writer.writeBinary(all_points_dir, *pcl_wait_save);
-            pcl_wait_save->clear();
-            scan_wait_num = 0;
-        }
-    }
-    */
-}
-
-void publish_frame_body(rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubLaserCloudFull_body)
-{
-    int size = feats_undistort->points.size();
-    PointCloudXYZI::Ptr laserCloudIMUBody(new PointCloudXYZI(size, 1));
-
-    for (int i = 0; i < size; i++)
-    {
-        RGBpointBodyLidarToIMU(&feats_undistort->points[i], \
-                            &laserCloudIMUBody->points[i]);
-    }
-
-    sensor_msgs::msg::PointCloud2 laserCloudmsg;
-    pcl::toROSMsg(*laserCloudIMUBody, laserCloudmsg);
-    laserCloudmsg.header.stamp = get_ros_time(lidar_end_time);
-    laserCloudmsg.header.frame_id = "imu_link";
-    pubLaserCloudFull_body->publish(laserCloudmsg);
-    publish_count -= PUBFRAME_PERIOD;
-}
-
-void publish_effect_world(rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubLaserCloudEffect)
-{
-    PointCloudXYZI::Ptr laserCloudWorld( \
-                    new PointCloudXYZI(effct_feat_num, 1));
-    for (int i = 0; i < effct_feat_num; i++)
-    {
-        RGBpointBodyToWorld(&laserCloudOri->points[i], \
-                            &laserCloudWorld->points[i]);
-    }
-    sensor_msgs::msg::PointCloud2 laserCloudFullRes3;
-    pcl::toROSMsg(*laserCloudWorld, laserCloudFullRes3);
-    laserCloudFullRes3.header.stamp = get_ros_time(lidar_end_time);
-    laserCloudFullRes3.header.frame_id = "odom";
-    pubLaserCloudEffect->publish(laserCloudFullRes3);
-}
-
-void publish_map(rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubLaserCloudMap)
-{
-    PointCloudXYZI::Ptr laserCloudFullRes(dense_pub_en ? feats_undistort : feats_down_body);
-    int size = laserCloudFullRes->points.size();
-    PointCloudXYZI::Ptr laserCloudWorld( \
-                    new PointCloudXYZI(size, 1));
-
-    for (int i = 0; i < size; i++)
-    {
-        RGBpointBodyToWorld(&laserCloudFullRes->points[i], \
-                            &laserCloudWorld->points[i]);
-    }
-    *pcl_wait_pub += *laserCloudWorld;
-
-    sensor_msgs::msg::PointCloud2 laserCloudmsg;
-    pcl::toROSMsg(*pcl_wait_pub, laserCloudmsg);
-    // laserCloudmsg.header.stamp = ros::Time().fromSec(lidar_end_time);
-    laserCloudmsg.header.stamp = get_ros_time(lidar_end_time);
-    laserCloudmsg.header.frame_id = "odom";
-    pubLaserCloudMap->publish(laserCloudmsg);
-
-    // sensor_msgs::msg::PointCloud2 laserCloudMap;
-    // pcl::toROSMsg(*featsFromMap, laserCloudMap);
-    // laserCloudMap.header.stamp = get_ros_time(lidar_end_time);
-    // laserCloudMap.header.frame_id = "odom";
-    // pubLaserCloudMap->publish(laserCloudMap);
-}
-
 void save_to_pcd()
 {
     pcl::PCDWriter pcd_writer;
@@ -617,25 +497,6 @@ void set_posestamp(T & out)
     
 }
 
-void publish_odometry(const rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr /*pubOdomAftMapped*/, std::unique_ptr<tf2_ros::TransformBroadcaster> & /*tf_br*/)
-{
-}
-
-void publish_path(rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pubPath)
-{
-    set_posestamp(msg_body_pose);
-    msg_body_pose.header.stamp = get_ros_time(lidar_end_time); // ros::Time().fromSec(lidar_end_time);
-    msg_body_pose.header.frame_id = "odom";
-
-    /*** if path is too large, the rvis will crash ***/
-    static int jjj = 0;
-    jjj++;
-    if (jjj % 10 == 0) 
-    {
-        path.poses.push_back(msg_body_pose);
-        pubPath->publish(path);
-    }
-}
 
 void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_data)
 {
@@ -761,6 +622,7 @@ class LaserMappingNode : public rclcpp::Node
 public:
     LaserMappingNode(const rclcpp::NodeOptions& options = rclcpp::NodeOptions()) : Node("laser_mapping", options)
     {
+        this->declare_parameter<string>("frame_prefix", "");
         this->declare_parameter<bool>("publish.path_en", true);
         this->declare_parameter<bool>("publish.effect_map_en", false);
         this->declare_parameter<bool>("publish.map_en", false);
@@ -797,6 +659,7 @@ public:
         this->declare_parameter<vector<double>>("mapping.extrinsic_T", vector<double>());
         this->declare_parameter<vector<double>>("mapping.extrinsic_R", vector<double>());
 
+        this->get_parameter_or<string>("frame_prefix", frame_prefix_, "");
         this->get_parameter_or<bool>("publish.path_en", path_en, true);
         this->get_parameter_or<bool>("publish.effect_map_en", effect_pub_en, false);
         this->get_parameter_or<bool>("publish.map_en", map_pub_en, false);
@@ -866,7 +729,7 @@ public:
         RCLCPP_INFO(this->get_logger(), "===========================");
 
         path.header.stamp = this->get_clock()->now();
-        path.header.frame_id ="odom";
+        path.header.frame_id = frame_prefix_ + "odom";
 
         // /*** variables definition ***/
         // int effect_feat_num = 0, frame_num = 0;
@@ -926,12 +789,12 @@ public:
             imu_topic, 10,
             std::bind(&LaserMappingNode::imu_cbk, this, std::placeholders::_1),
             imu_opts);
-        pubLaserCloudFull_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/cloud_registered", 20);
-        pubLaserCloudFull_body_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/cloud_registered_body", 20);
-        pubLaserCloudEffect_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/cloud_effected", 20);
-        pubLaserCloudMap_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/Laser_map", 20);
-        pubOdomAftMapped_ = this->create_publisher<nav_msgs::msg::Odometry>("/odom", rclcpp::SensorDataQoS());
-        pubPath_ = this->create_publisher<nav_msgs::msg::Path>("/path", 20);
+        pubLaserCloudFull_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("cloud_registered", 20);
+        pubLaserCloudFull_body_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("cloud_registered_body", 20);
+        pubLaserCloudEffect_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("cloud_effected", 20);
+        pubLaserCloudMap_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("Laser_map", 20);
+        pubOdomAftMapped_ = this->create_publisher<nav_msgs::msg::Odometry>("odom", rclcpp::SensorDataQoS());
+        pubPath_ = this->create_publisher<nav_msgs::msg::Path>("path", 20);
         tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
 
         //------------------------------------------------------------------------------------------------------
@@ -956,6 +819,80 @@ public:
     rclcpp::CallbackGroup::SharedPtr get_imu_callback_group() { return imu_cb_group_; }
 
 private:
+    void publish_frame_world()
+    {
+        PointCloudXYZI::Ptr laserCloudFullRes(dense_pub_en ? feats_undistort : feats_down_body);
+        int size = laserCloudFullRes->points.size();
+        PointCloudXYZI::Ptr laserCloudWorld(new PointCloudXYZI(size, 1));
+
+        for (int i = 0; i < size; i++)
+        {
+            RGBpointBodyToWorld(&laserCloudFullRes->points[i],
+                                &laserCloudWorld->points[i]);
+        }
+
+        sensor_msgs::msg::PointCloud2 laserCloudmsg;
+        pcl::toROSMsg(*laserCloudWorld, laserCloudmsg);
+        laserCloudmsg.header.stamp = get_ros_time(lidar_end_time);
+        laserCloudmsg.header.frame_id = frame_prefix_ + "odom";
+        pubLaserCloudFull_->publish(laserCloudmsg);
+        publish_count -= PUBFRAME_PERIOD;
+    }
+
+    void publish_frame_body()
+    {
+        int size = feats_undistort->points.size();
+        PointCloudXYZI::Ptr laserCloudIMUBody(new PointCloudXYZI(size, 1));
+
+        for (int i = 0; i < size; i++)
+        {
+            RGBpointBodyLidarToIMU(&feats_undistort->points[i],
+                                &laserCloudIMUBody->points[i]);
+        }
+
+        sensor_msgs::msg::PointCloud2 laserCloudmsg;
+        pcl::toROSMsg(*laserCloudIMUBody, laserCloudmsg);
+        laserCloudmsg.header.stamp = get_ros_time(lidar_end_time);
+        laserCloudmsg.header.frame_id = frame_prefix_ + "imu_link";
+        pubLaserCloudFull_body_->publish(laserCloudmsg);
+        publish_count -= PUBFRAME_PERIOD;
+    }
+
+    void publish_effect_world()
+    {
+        PointCloudXYZI::Ptr laserCloudWorld(new PointCloudXYZI(effct_feat_num, 1));
+        for (int i = 0; i < effct_feat_num; i++)
+        {
+            RGBpointBodyToWorld(&laserCloudOri->points[i],
+                                &laserCloudWorld->points[i]);
+        }
+        sensor_msgs::msg::PointCloud2 laserCloudFullRes3;
+        pcl::toROSMsg(*laserCloudWorld, laserCloudFullRes3);
+        laserCloudFullRes3.header.stamp = get_ros_time(lidar_end_time);
+        laserCloudFullRes3.header.frame_id = frame_prefix_ + "odom";
+        pubLaserCloudEffect_->publish(laserCloudFullRes3);
+    }
+
+    void publish_map()
+    {
+        PointCloudXYZI::Ptr laserCloudFullRes(dense_pub_en ? feats_undistort : feats_down_body);
+        int size = laserCloudFullRes->points.size();
+        PointCloudXYZI::Ptr laserCloudWorld(new PointCloudXYZI(size, 1));
+
+        for (int i = 0; i < size; i++)
+        {
+            RGBpointBodyToWorld(&laserCloudFullRes->points[i],
+                                &laserCloudWorld->points[i]);
+        }
+        *pcl_wait_pub += *laserCloudWorld;
+
+        sensor_msgs::msg::PointCloud2 laserCloudmsg;
+        pcl::toROSMsg(*pcl_wait_pub, laserCloudmsg);
+        laserCloudmsg.header.stamp = get_ros_time(lidar_end_time);
+        laserCloudmsg.header.frame_id = frame_prefix_ + "odom";
+        pubLaserCloudMap_->publish(laserCloudmsg);
+    }
+
     void timer_callback()
     {
         if(sync_packages(Measures))
@@ -1082,10 +1019,9 @@ private:
             t5 = omp_get_wtime();
             
             /******* Publish points *******/
-            if (scan_pub_en)      publish_frame_world(pubLaserCloudFull_);
-            if (scan_pub_en && scan_body_pub_en) publish_frame_body(pubLaserCloudFull_body_);
-            if (effect_pub_en) publish_effect_world(pubLaserCloudEffect_);
-            // if (map_pub_en) publish_map(pubLaserCloudMap_);
+            if (scan_pub_en) publish_frame_world();
+            if (scan_pub_en && scan_body_pub_en) publish_frame_body();
+            if (effect_pub_en) publish_effect_world();
 
             /*** Debug variables ***/
             if (runtime_pos_log)
@@ -1121,7 +1057,7 @@ private:
 
     void map_publish_callback()
     {
-        if (map_pub_en) publish_map(pubLaserCloudMap_);
+        if (map_pub_en) publish_map();
     }
 
     void map_save_callback(std_srvs::srv::Trigger::Request::ConstSharedPtr req, std_srvs::srv::Trigger::Response::SharedPtr res)
@@ -1194,8 +1130,8 @@ private:
         q.normalize();
 
         nav_msgs::msg::Odometry odom;
-        odom.header.frame_id = "odom";
-        odom.child_frame_id = "imu_link";
+        odom.header.frame_id = frame_prefix_ + "odom";
+        odom.child_frame_id = frame_prefix_ + "imu_link";
         odom.header.stamp = msg->header.stamp;
         odom.pose.pose.position.x = prop_pos(0);
         odom.pose.pose.position.y = prop_pos(1);
@@ -1249,8 +1185,8 @@ private:
         pubOdomAftMapped_->publish(odom);
 
         geometry_msgs::msg::TransformStamped trans;
-        trans.header.frame_id = "odom";
-        trans.child_frame_id = "imu_link";
+        trans.header.frame_id = frame_prefix_ + "odom";
+        trans.child_frame_id = frame_prefix_ + "imu_link";
         trans.header.stamp = msg->header.stamp;
         trans.transform.translation.x = prop_pos(0);
         trans.transform.translation.y = prop_pos(1);
@@ -1264,7 +1200,7 @@ private:
         if (path_en && publish_count % 20 == 0) {
             geometry_msgs::msg::PoseStamped pose;
             pose.header.stamp = msg->header.stamp;
-            pose.header.frame_id = "odom";
+            pose.header.frame_id = frame_prefix_ + "odom";
             pose.pose.position.x = prop_pos(0);
             pose.pose.position.y = prop_pos(1);
             pose.pose.position.z = prop_pos(2);
@@ -1294,6 +1230,7 @@ private:
     rclcpp::TimerBase::SharedPtr map_pub_timer_;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr map_save_srv_;
 
+    string frame_prefix_;
     bool effect_pub_en = false, map_pub_en = false;
     int effect_feat_num = 0, frame_num = 0;
     double deltaT, deltaR, aver_time_consu = 0, aver_time_icp = 0, aver_time_match = 0, aver_time_incre = 0, aver_time_solve = 0, aver_time_const_H_time = 0;
