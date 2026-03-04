@@ -296,12 +296,18 @@ void lasermap_fov_segment()
     kdtree_delete_time = omp_get_wtime() - delete_begin;
 }
 
-void standard_pcl_cbk(const sensor_msgs::msg::PointCloud2::UniquePtr msg) 
+void standard_pcl_cbk(const sensor_msgs::msg::PointCloud2::UniquePtr msg)
 {
-    mtx_buffer.lock();
-    scan_count ++;
     double cur_time = get_time_sec(msg->header.stamp);
     double preprocess_start_time = omp_get_wtime();
+
+    PointCloudXYZI::Ptr ptr(new PointCloudXYZI());
+    p_pre->process(msg, ptr);
+
+    double preprocess_elapsed = omp_get_wtime() - preprocess_start_time;
+
+    mtx_buffer.lock();
+    scan_count++;
     if (!is_first_lidar && cur_time < last_timestamp_lidar)
     {
         std::cerr << "lidar loop back, clear buffer" << std::endl;
@@ -311,39 +317,42 @@ void standard_pcl_cbk(const sensor_msgs::msg::PointCloud2::UniquePtr msg)
     {
         is_first_lidar = false;
     }
-
-    PointCloudXYZI::Ptr  ptr(new PointCloudXYZI());
-    p_pre->process(msg, ptr);
     lidar_buffer.push_back(ptr);
     time_buffer.push_back(cur_time);
     last_timestamp_lidar = cur_time;
-    s_plot11[scan_count] = omp_get_wtime() - preprocess_start_time;
+    s_plot11[scan_count] = preprocess_elapsed;
     mtx_buffer.unlock();
     sig_buffer.notify_all();
 }
 
 double timediff_lidar_wrt_imu = 0.0;
 bool   timediff_set_flg = false;
-void livox_pcl_cbk(const livox_ros_driver2::msg::CustomMsg::UniquePtr msg) 
+void livox_pcl_cbk(const livox_ros_driver2::msg::CustomMsg::UniquePtr msg)
 {
-    mtx_buffer.lock();
     double cur_time = get_time_sec(msg->header.stamp);
     double preprocess_start_time = omp_get_wtime();
-    scan_count ++;
+
+    PointCloudXYZI::Ptr ptr(new PointCloudXYZI());
+    p_pre->process(msg, ptr);
+
+    double preprocess_elapsed = omp_get_wtime() - preprocess_start_time;
+
+    mtx_buffer.lock();
+    scan_count++;
     if (!is_first_lidar && cur_time < last_timestamp_lidar)
     {
         std::cerr << "lidar loop back, clear buffer" << std::endl;
         lidar_buffer.clear();
     }
-    if(is_first_lidar)
+    if (is_first_lidar)
     {
         is_first_lidar = false;
     }
     last_timestamp_lidar = cur_time;
-    
-    if (!time_sync_en && abs(last_timestamp_imu - last_timestamp_lidar) > 10.0 && !imu_buffer.empty() && !lidar_buffer.empty() )
+
+    if (!time_sync_en && abs(last_timestamp_imu - last_timestamp_lidar) > 10.0 && !imu_buffer.empty() && !lidar_buffer.empty())
     {
-        printf("IMU and LiDAR not Synced, IMU time: %lf, lidar header time: %lf \n",last_timestamp_imu, last_timestamp_lidar);
+        printf("IMU and LiDAR not Synced, IMU time: %lf, lidar header time: %lf \n", last_timestamp_imu, last_timestamp_lidar);
     }
 
     if (time_sync_en && !timediff_set_flg && abs(last_timestamp_lidar - last_timestamp_imu) > 1 && !imu_buffer.empty())
@@ -353,12 +362,9 @@ void livox_pcl_cbk(const livox_ros_driver2::msg::CustomMsg::UniquePtr msg)
         printf("Self sync IMU and LiDAR, time diff is %.10lf \n", timediff_lidar_wrt_imu);
     }
 
-    PointCloudXYZI::Ptr  ptr(new PointCloudXYZI());
-    p_pre->process(msg, ptr);
     lidar_buffer.push_back(ptr);
     time_buffer.push_back(last_timestamp_lidar);
-    
-    s_plot11[scan_count] = omp_get_wtime() - preprocess_start_time;
+    s_plot11[scan_count] = preprocess_elapsed;
     mtx_buffer.unlock();
     sig_buffer.notify_all();
 }
@@ -367,6 +373,7 @@ double lidar_mean_scantime = 0.0;
 int    scan_num = 0;
 bool sync_packages(MeasureGroup &meas)
 {
+    std::lock_guard<std::mutex> lock(mtx_buffer);
     if (lidar_buffer.empty() || imu_buffer.empty()) {
         return false;
     }
@@ -912,9 +919,13 @@ public:
         {
             sub_pcl_pc_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(lid_topic, rclcpp::SensorDataQoS(), standard_pcl_cbk);
         }
+        imu_cb_group_ = this->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+        rclcpp::SubscriptionOptions imu_opts;
+        imu_opts.callback_group = imu_cb_group_;
         sub_imu_ = this->create_subscription<sensor_msgs::msg::Imu>(
             imu_topic, 200,
-            std::bind(&LaserMappingNode::imu_cbk, this, std::placeholders::_1));
+            std::bind(&LaserMappingNode::imu_cbk, this, std::placeholders::_1),
+            imu_opts);
         pubLaserCloudFull_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/cloud_registered", 20);
         pubLaserCloudFull_body_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/cloud_registered_body", 20);
         pubLaserCloudEffect_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/cloud_effected", 20);
@@ -941,6 +952,8 @@ public:
         fout_pre.close();
         fclose(fp);
     }
+
+    rclcpp::CallbackGroup::SharedPtr get_imu_callback_group() { return imu_cb_group_; }
 
 private:
     void timer_callback()
@@ -1248,7 +1261,7 @@ private:
         trans.transform.rotation.w = q.w();
         tf_broadcaster_->sendTransform(trans);
 
-        if (path_en) {
+        if (path_en && publish_count % 20 == 0) {
             geometry_msgs::msg::PoseStamped pose;
             pose.header.stamp = msg->header.stamp;
             pose.header.frame_id = "odom";
@@ -1272,6 +1285,7 @@ private:
     rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pubOdomAftMapped_;
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pubPath_;
     rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr sub_imu_;
+    rclcpp::CallbackGroup::SharedPtr imu_cb_group_;
     rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr sub_pcl_pc_;
     rclcpp::Subscription<livox_ros_driver2::msg::CustomMsg>::SharedPtr sub_pcl_livox_;
 
@@ -1296,7 +1310,27 @@ int main(int argc, char** argv)
 
     signal(SIGINT, SigHandle);
 
-    rclcpp::spin(std::make_shared<LaserMappingNode>());
+    auto node = std::make_shared<LaserMappingNode>();
+
+    rclcpp::executors::SingleThreadedExecutor imu_executor;
+    rclcpp::executors::SingleThreadedExecutor main_executor;
+
+    imu_executor.add_callback_group(
+        node->get_imu_callback_group(),
+        node->get_node_base_interface());
+    main_executor.add_callback_group(
+        node->get_node_base_interface()->get_default_callback_group(),
+        node->get_node_base_interface());
+
+    std::thread imu_thread([&imu_executor]() {
+        imu_executor.spin();
+    });
+
+    main_executor.spin();
+
+    imu_executor.cancel();
+    if (imu_thread.joinable())
+        imu_thread.join();
 
     if (rclcpp::ok())
         rclcpp::shutdown();
