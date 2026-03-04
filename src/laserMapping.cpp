@@ -923,7 +923,7 @@ public:
         rclcpp::SubscriptionOptions imu_opts;
         imu_opts.callback_group = imu_cb_group_;
         sub_imu_ = this->create_subscription<sensor_msgs::msg::Imu>(
-            imu_topic, 200,
+            imu_topic, 10,
             std::bind(&LaserMappingNode::imu_cbk, this, std::placeholders::_1),
             imu_opts);
         pubLaserCloudFull_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/cloud_registered", 20);
