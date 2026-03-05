@@ -3,8 +3,8 @@ import os.path
 from ament_index_python.packages import get_package_share_directory
 
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument
-from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
+from launch.actions import DeclareLaunchArgument, OpaqueFunction
+from launch.substitutions import LaunchConfiguration
 from launch.conditions import IfCondition
 
 from launch_ros.actions import Node
@@ -18,7 +18,6 @@ def generate_launch_description():
         package_path, 'rviz', 'fastlio.rviz')
 
     use_sim_time = LaunchConfiguration('use_sim_time')
-    config_path = LaunchConfiguration('config_path')
     config_file = LaunchConfiguration('config_file')
     rviz_use = LaunchConfiguration('rviz')
     rviz_cfg = LaunchConfiguration('rviz_cfg')
@@ -30,13 +29,10 @@ def generate_launch_description():
         'use_sim_time', default_value='false',
         description='Use simulation (Gazebo) clock if true'
     )
-    declare_config_path_cmd = DeclareLaunchArgument(
-        'config_path', default_value=default_config_path,
-        description='Yaml config file path'
-    )
+    default_config_file = os.path.join(default_config_path, 'mid360.yaml')
     declare_config_file_cmd = DeclareLaunchArgument(
-        'config_file', default_value='mid360.yaml',
-        description='Config file'
+        'config_file', default_value=default_config_file,
+        description='Config file path (absolute or relative)'
     )
     declare_rviz_cmd = DeclareLaunchArgument(
         'rviz', default_value='true',
@@ -71,23 +67,28 @@ def generate_launch_description():
         output='screen'
     )
 
-    livox_imu_to_base_link = Node(
-        package='tf2_ros',
-        executable='static_transform_publisher',
-        namespace=namespace,
-        arguments=['--frame-id', 'imu_link',
-                   '--child-frame-id', 'base_link',
-                   '--z', '-0.12'],
-    )
+    # livox_imu_to_base_link = Node(
+    #     package='tf2_ros',
+    #     executable='static_transform_publisher',
+    #     namespace=namespace,
+    #     arguments=['--frame-id', 'imu_link',
+    #                '--child-frame-id', 'base_link',
+    #                '--z', '-0.12'],
+    # )
 
-    fast_lio_node = Node(
-        package='fast_lio',
-        executable='fastlio_mapping',
-        namespace=namespace,
-        parameters=[PathJoinSubstitution([config_path, config_file]),
-                    {'use_sim_time': use_sim_time}],
-        output='screen'
-    )
+    def launch_fast_lio(context):
+        resolved_config = LaunchConfiguration('config_file').perform(context)
+        resolved_config = os.path.abspath(resolved_config)
+        resolved_ns = LaunchConfiguration('namespace').perform(context)
+        resolved_sim_time = LaunchConfiguration('use_sim_time').perform(context)
+        return [Node(
+            package='fast_lio',
+            executable='fastlio_mapping',
+            namespace=resolved_ns,
+            parameters=[resolved_config,
+                        {'use_sim_time': resolved_sim_time == 'true'}],
+            output='screen'
+        )]
 
     mocap_converter_node = Node(
         package='fast_lio',
@@ -111,7 +112,6 @@ def generate_launch_description():
 
     ld = LaunchDescription()
     ld.add_action(declare_use_sim_time_cmd)
-    ld.add_action(declare_config_path_cmd)
     ld.add_action(declare_config_file_cmd)
     ld.add_action(declare_rviz_cmd)
     ld.add_action(declare_rviz_config_path_cmd)
@@ -120,8 +120,8 @@ def generate_launch_description():
     ld.add_action(declare_mocap_cmd)
 
     ld.add_action(lidar_accumulator_node)
-    ld.add_action(livox_imu_to_base_link)
-    ld.add_action(fast_lio_node)
+    # ld.add_action(livox_imu_to_base_link)
+    ld.add_action(OpaqueFunction(function=launch_fast_lio))
     ld.add_action(mocap_converter_node)
     ld.add_action(rviz_node)
 

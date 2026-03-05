@@ -623,6 +623,9 @@ public:
     LaserMappingNode(const rclcpp::NodeOptions& options = rclcpp::NodeOptions()) : Node("laser_mapping", options)
     {
         this->declare_parameter<string>("frame_prefix", "");
+        this->declare_parameter<string>("odom_frame", "odom");
+        this->declare_parameter<string>("body_frame", "imu_link");
+        this->declare_parameter<bool>("publish.tf_en", true);
         this->declare_parameter<bool>("publish.path_en", true);
         this->declare_parameter<bool>("publish.effect_map_en", false);
         this->declare_parameter<bool>("publish.map_en", false);
@@ -660,6 +663,9 @@ public:
         this->declare_parameter<vector<double>>("mapping.extrinsic_R", vector<double>());
 
         this->get_parameter_or<string>("frame_prefix", frame_prefix_, "");
+        this->get_parameter_or<string>("odom_frame", odom_frame_, "odom");
+        this->get_parameter_or<string>("body_frame", body_frame_, "imu_link");
+        this->get_parameter_or<bool>("publish.tf_en", tf_pub_en_, true);
         this->get_parameter_or<bool>("publish.path_en", path_en, true);
         this->get_parameter_or<bool>("publish.effect_map_en", effect_pub_en, false);
         this->get_parameter_or<bool>("publish.map_en", map_pub_en, false);
@@ -729,7 +735,7 @@ public:
         RCLCPP_INFO(this->get_logger(), "===========================");
 
         path.header.stamp = this->get_clock()->now();
-        path.header.frame_id = frame_prefix_ + "odom";
+        path.header.frame_id = frame_prefix_ + odom_frame_;
 
         // /*** variables definition ***/
         // int effect_feat_num = 0, frame_num = 0;
@@ -834,7 +840,7 @@ private:
         sensor_msgs::msg::PointCloud2 laserCloudmsg;
         pcl::toROSMsg(*laserCloudWorld, laserCloudmsg);
         laserCloudmsg.header.stamp = get_ros_time(lidar_end_time);
-        laserCloudmsg.header.frame_id = frame_prefix_ + "odom";
+        laserCloudmsg.header.frame_id = frame_prefix_ + odom_frame_;
         pubLaserCloudFull_->publish(laserCloudmsg);
         publish_count -= PUBFRAME_PERIOD;
     }
@@ -853,7 +859,7 @@ private:
         sensor_msgs::msg::PointCloud2 laserCloudmsg;
         pcl::toROSMsg(*laserCloudIMUBody, laserCloudmsg);
         laserCloudmsg.header.stamp = get_ros_time(lidar_end_time);
-        laserCloudmsg.header.frame_id = frame_prefix_ + "imu_link";
+        laserCloudmsg.header.frame_id = frame_prefix_ + body_frame_;
         pubLaserCloudFull_body_->publish(laserCloudmsg);
         publish_count -= PUBFRAME_PERIOD;
     }
@@ -869,7 +875,7 @@ private:
         sensor_msgs::msg::PointCloud2 laserCloudFullRes3;
         pcl::toROSMsg(*laserCloudWorld, laserCloudFullRes3);
         laserCloudFullRes3.header.stamp = get_ros_time(lidar_end_time);
-        laserCloudFullRes3.header.frame_id = frame_prefix_ + "odom";
+        laserCloudFullRes3.header.frame_id = frame_prefix_ + odom_frame_;
         pubLaserCloudEffect_->publish(laserCloudFullRes3);
     }
 
@@ -889,7 +895,7 @@ private:
         sensor_msgs::msg::PointCloud2 laserCloudmsg;
         pcl::toROSMsg(*pcl_wait_pub, laserCloudmsg);
         laserCloudmsg.header.stamp = get_ros_time(lidar_end_time);
-        laserCloudmsg.header.frame_id = frame_prefix_ + "odom";
+        laserCloudmsg.header.frame_id = frame_prefix_ + odom_frame_;
         pubLaserCloudMap_->publish(laserCloudmsg);
     }
 
@@ -1130,8 +1136,8 @@ private:
         q.normalize();
 
         nav_msgs::msg::Odometry odom;
-        odom.header.frame_id = frame_prefix_ + "odom";
-        odom.child_frame_id = frame_prefix_ + "imu_link";
+        odom.header.frame_id = frame_prefix_ + odom_frame_;
+        odom.child_frame_id = frame_prefix_ + body_frame_;
         odom.header.stamp = msg->header.stamp;
         odom.pose.pose.position.x = prop_pos(0);
         odom.pose.pose.position.y = prop_pos(1);
@@ -1184,23 +1190,25 @@ private:
 
         pubOdomAftMapped_->publish(odom);
 
-        geometry_msgs::msg::TransformStamped trans;
-        trans.header.frame_id = frame_prefix_ + "odom";
-        trans.child_frame_id = frame_prefix_ + "imu_link";
-        trans.header.stamp = msg->header.stamp;
-        trans.transform.translation.x = prop_pos(0);
-        trans.transform.translation.y = prop_pos(1);
-        trans.transform.translation.z = prop_pos(2);
-        trans.transform.rotation.x = q.x();
-        trans.transform.rotation.y = q.y();
-        trans.transform.rotation.z = q.z();
-        trans.transform.rotation.w = q.w();
-        tf_broadcaster_->sendTransform(trans);
+        if (tf_pub_en_) {
+            geometry_msgs::msg::TransformStamped trans;
+            trans.header.frame_id = frame_prefix_ + odom_frame_;
+            trans.child_frame_id = frame_prefix_ + body_frame_;
+            trans.header.stamp = msg->header.stamp;
+            trans.transform.translation.x = prop_pos(0);
+            trans.transform.translation.y = prop_pos(1);
+            trans.transform.translation.z = prop_pos(2);
+            trans.transform.rotation.x = q.x();
+            trans.transform.rotation.y = q.y();
+            trans.transform.rotation.z = q.z();
+            trans.transform.rotation.w = q.w();
+            tf_broadcaster_->sendTransform(trans);
+        }
 
         if (path_en && publish_count % 20 == 0) {
             geometry_msgs::msg::PoseStamped pose;
             pose.header.stamp = msg->header.stamp;
-            pose.header.frame_id = frame_prefix_ + "odom";
+            pose.header.frame_id = frame_prefix_ + odom_frame_;
             pose.pose.position.x = prop_pos(0);
             pose.pose.position.y = prop_pos(1);
             pose.pose.position.z = prop_pos(2);
@@ -1231,6 +1239,9 @@ private:
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr map_save_srv_;
 
     string frame_prefix_;
+    string odom_frame_;
+    string body_frame_;
+    bool tf_pub_en_ = true;
     bool effect_pub_en = false, map_pub_en = false;
     int effect_feat_num = 0, frame_num = 0;
     double deltaT, deltaR, aver_time_consu = 0, aver_time_icp = 0, aver_time_match = 0, aver_time_incre = 0, aver_time_solve = 0, aver_time_const_H_time = 0;
