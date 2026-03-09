@@ -99,9 +99,9 @@ bool   lidar_pushed, flg_first_scan = true, flg_exit = false, flg_EKF_inited;
 bool   scan_pub_en = false, dense_pub_en = false, scan_body_pub_en = false;
 bool    is_first_lidar = true;
 
-vector<vector<int>>  pointSearchInd_surf; 
+vector<vector<int>>  pointSearchInd_surf;
 vector<BoxPointType> cub_needrm;
-vector<PointVector>  Nearest_Points; 
+vector<PointVector>  Nearest_Points;
 vector<double>       extrinT(3, 0.0);
 vector<double>       extrinR(9, 0.0);
 deque<double>                     time_buffer;
@@ -167,19 +167,19 @@ void SigHandle(int sig)
     rclcpp::shutdown();
 }
 
-inline void dump_lio_state_to_log(FILE *fp)  
+inline void dump_lio_state_to_log(FILE *fp)
 {
     V3D rot_ang(Log(state_point.rot.toRotationMatrix()));
     fprintf(fp, "%lf ", Measures.lidar_beg_time - first_lidar_time);
     fprintf(fp, "%lf %lf %lf ", rot_ang(0), rot_ang(1), rot_ang(2));                   // Angle
-    fprintf(fp, "%lf %lf %lf ", state_point.pos(0), state_point.pos(1), state_point.pos(2)); // Pos  
-    fprintf(fp, "%lf %lf %lf ", 0.0, 0.0, 0.0);                                        // omega  
-    fprintf(fp, "%lf %lf %lf ", state_point.vel(0), state_point.vel(1), state_point.vel(2)); // Vel  
-    fprintf(fp, "%lf %lf %lf ", 0.0, 0.0, 0.0);                                        // Acc  
-    fprintf(fp, "%lf %lf %lf ", state_point.bg(0), state_point.bg(1), state_point.bg(2));    // Bias_g  
-    fprintf(fp, "%lf %lf %lf ", state_point.ba(0), state_point.ba(1), state_point.ba(2));    // Bias_a  
-    fprintf(fp, "%lf %lf %lf ", state_point.grav[0], state_point.grav[1], state_point.grav[2]); // Bias_a  
-    fprintf(fp, "\r\n");  
+    fprintf(fp, "%lf %lf %lf ", state_point.pos(0), state_point.pos(1), state_point.pos(2)); // Pos
+    fprintf(fp, "%lf %lf %lf ", 0.0, 0.0, 0.0);                                        // omega
+    fprintf(fp, "%lf %lf %lf ", state_point.vel(0), state_point.vel(1), state_point.vel(2)); // Vel
+    fprintf(fp, "%lf %lf %lf ", 0.0, 0.0, 0.0);                                        // Acc
+    fprintf(fp, "%lf %lf %lf ", state_point.bg(0), state_point.bg(1), state_point.bg(2));    // Bias_g
+    fprintf(fp, "%lf %lf %lf ", state_point.ba(0), state_point.ba(1), state_point.ba(2));    // Bias_a
+    fprintf(fp, "%lf %lf %lf ", state_point.grav[0], state_point.grav[1], state_point.grav[2]); // Bias_a
+    fprintf(fp, "\r\n");
     fflush(fp);
 }
 
@@ -252,7 +252,7 @@ void lasermap_fov_segment()
 {
     cub_needrm.clear();
     kdtree_delete_counter = 0;
-    kdtree_delete_time = 0.0;    
+    kdtree_delete_time = 0.0;
     pointBodyToWorld(XAxisPoint_body, XAxisPoint_world);
     V3D pos_LiD = pos_lid;
     if (!Localmap_Initialized){
@@ -443,7 +443,7 @@ void map_incremental()
             const PointVector &points_near = Nearest_Points[i];
             bool need_add = true;
             BoxPointType Box_of_Point;
-            PointType downsample_result, mid_point; 
+            PointType downsample_result, mid_point;
             mid_point.x = floor(feats_down_world->points[i].x/filter_size_map_min)*filter_size_map_min + 0.5 * filter_size_map_min;
             mid_point.y = floor(feats_down_world->points[i].y/filter_size_map_min)*filter_size_map_min + 0.5 * filter_size_map_min;
             mid_point.z = floor(feats_down_world->points[i].z/filter_size_map_min)*filter_size_map_min + 0.5 * filter_size_map_min;
@@ -471,7 +471,7 @@ void map_incremental()
 
     double st_time = omp_get_wtime();
     add_point_size = ikdtree.Add_Points(PointToAdd, true);
-    ikdtree.Add_Points(PointNoNeedDownsample, false); 
+    ikdtree.Add_Points(PointNoNeedDownsample, false);
     add_point_size = PointToAdd.size() + PointNoNeedDownsample.size();
     kdtree_incremental_time = omp_get_wtime() - st_time;
 }
@@ -494,16 +494,16 @@ void set_posestamp(T & out)
     out.pose.orientation.y = geoQuat.y;
     out.pose.orientation.z = geoQuat.z;
     out.pose.orientation.w = geoQuat.w;
-    
+
 }
 
 
 void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_data)
 {
     double match_start = omp_get_wtime();
-    laserCloudOri->clear(); 
-    corr_normvect->clear(); 
-    total_residual = 0.0; 
+    laserCloudOri->clear();
+    corr_normvect->clear();
+    total_residual = 0.0;
 
     /** closest surface search and residual computation **/
     #ifdef MP_EN
@@ -512,8 +512,8 @@ void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_
     #endif
     for (int i = 0; i < feats_down_size; i++)
     {
-        PointType &point_body  = feats_down_body->points[i]; 
-        PointType &point_world = feats_down_world->points[i]; 
+        PointType &point_body  = feats_down_body->points[i];
+        PointType &point_world = feats_down_world->points[i];
 
         /* transform to world frame */
         V3D p_body(point_body.x, point_body.y, point_body.z);
@@ -554,7 +554,7 @@ void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_
             }
         }
     }
-    
+
     effct_feat_num = 0;
 
     for (int i = 0; i < feats_down_size; i++)
@@ -579,7 +579,7 @@ void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_
     res_mean_last = total_residual / effct_feat_num;
     match_time  += omp_get_wtime() - match_start;
     double solve_start_  = omp_get_wtime();
-    
+
     /*** Computation of Measuremnt Jacobian matrix H and measurents vector ***/
     ekfom_data.h_x = MatrixXd::Zero(effct_feat_num, 12); //23
     ekfom_data.h.resize(effct_feat_num);
@@ -626,6 +626,7 @@ public:
         this->declare_parameter<string>("odom_frame", "odom");
         this->declare_parameter<string>("body_frame", "imu_link");
         this->declare_parameter<bool>("publish.tf_en", true);
+        this->declare_parameter<double>("publish.vel_filter_alpha", 1.0);
         this->declare_parameter<bool>("publish.path_en", true);
         this->declare_parameter<bool>("publish.effect_map_en", false);
         this->declare_parameter<bool>("publish.map_en", false);
@@ -666,6 +667,7 @@ public:
         this->get_parameter_or<string>("odom_frame", odom_frame_, "odom");
         this->get_parameter_or<string>("body_frame", body_frame_, "imu_link");
         this->get_parameter_or<bool>("publish.tf_en", tf_pub_en_, true);
+        this->get_parameter_or<double>("publish.vel_filter_alpha", vel_filter_alpha_, 1.0);
         this->get_parameter_or<bool>("publish.path_en", path_en, true);
         this->get_parameter_or<bool>("publish.effect_map_en", effect_pub_en, false);
         this->get_parameter_or<bool>("publish.map_en", map_pub_en, false);
@@ -958,7 +960,7 @@ private:
             }
             int featsFromMapNum = ikdtree.validnum();
             kdtree_size_st = ikdtree.size();
-            
+
             // cout<<"[ mapping ]: In num: "<<feats_undistort->points.size()<<" downsamp "<<feats_down_size<<" Map num: "<<featsFromMapNum<<"effect num:"<<effct_feat_num<<endl;
 
             /*** ICP and iterated Kalman filter update ***/
@@ -967,7 +969,7 @@ private:
                 RCLCPP_WARN(this->get_logger(), "No point, skip this scan!\n");
                 return;
             }
-            
+
             normvec->resize(feats_down_size);
             feats_down_world->resize(feats_down_size);
 
@@ -989,7 +991,7 @@ private:
             bool nearest_search_en = true; //
 
             t2 = omp_get_wtime();
-            
+
             /*** iterated state estimation ***/
             double t_update_start = omp_get_wtime();
             double solve_H_time = 0;
@@ -1023,7 +1025,7 @@ private:
             t3 = omp_get_wtime();
             map_incremental();
             t5 = omp_get_wtime();
-            
+
             /******* Publish points *******/
             if (scan_pub_en) publish_frame_world();
             if (scan_pub_en && scan_body_pub_en) publish_frame_body();
@@ -1119,7 +1121,11 @@ private:
 
         double imu_time = get_time_sec(msg->header.stamp);
         double dt = imu_time - anchor.timestamp;
-        if (dt <= 0.0 || dt > 0.5) return;
+        if (dt <= 0.0) return;
+        if (dt > 0.5) {
+            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                "EKF anchor stale (%.2fs), odom may drift", dt);
+        }
 
         V3D acc_cur(msg->linear_acceleration.x, msg->linear_acceleration.y, msg->linear_acceleration.z);
         V3D gyr_cur(msg->angular_velocity.x, msg->angular_velocity.y, msg->angular_velocity.z);
@@ -1134,6 +1140,12 @@ private:
 
         Eigen::Quaterniond q(prop_rot);
         q.normalize();
+        if (!quat_filter_init_) {
+            q_filtered_ = q;
+            quat_filter_init_ = true;
+        } else {
+            q_filtered_ = q_filtered_.slerp(vel_filter_alpha_, q);
+        }
 
         nav_msgs::msg::Odometry odom;
         odom.header.frame_id = frame_prefix_ + odom_frame_;
@@ -1142,10 +1154,10 @@ private:
         odom.pose.pose.position.x = prop_pos(0);
         odom.pose.pose.position.y = prop_pos(1);
         odom.pose.pose.position.z = prop_pos(2);
-        odom.pose.pose.orientation.x = q.x();
-        odom.pose.pose.orientation.y = q.y();
-        odom.pose.pose.orientation.z = q.z();
-        odom.pose.pose.orientation.w = q.w();
+        odom.pose.pose.orientation.x = q_filtered_.x();
+        odom.pose.pose.orientation.y = q_filtered_.y();
+        odom.pose.pose.orientation.z = q_filtered_.z();
+        odom.pose.pose.orientation.w = q_filtered_.w();
 
         Eigen::Matrix<double, 6, 23> J = Eigen::Matrix<double, 6, 23>::Zero();
         J.block<3,3>(0, 0) = M3D::Identity();
@@ -1181,12 +1193,25 @@ private:
         }
 
         V3D vel_body = prop_rot.transpose() * prop_vel;
-        odom.twist.twist.linear.x = vel_body(0);
-        odom.twist.twist.linear.y = vel_body(1);
-        odom.twist.twist.linear.z = vel_body(2);
-        odom.twist.twist.angular.x = omega(0);
-        odom.twist.twist.angular.y = omega(1);
-        odom.twist.twist.angular.z = omega(2);
+        if (!vel_filter_init_) {
+            vel_filtered_ = vel_body;
+            vel_filter_init_ = true;
+            RCLCPP_INFO(this->get_logger(), "Velocity filter alpha: %.4f", vel_filter_alpha_);
+        } else {
+            vel_filtered_ = vel_filter_alpha_ * vel_body + (1.0 - vel_filter_alpha_) * vel_filtered_;
+        }
+        odom.twist.twist.linear.x = vel_filtered_(0);
+        odom.twist.twist.linear.y = vel_filtered_(1);
+        odom.twist.twist.linear.z = vel_filtered_(2);
+        if (!omega_filter_init_) {
+            omega_filtered_ = omega;
+            omega_filter_init_ = true;
+        } else {
+            omega_filtered_ = vel_filter_alpha_ * omega + (1.0 - vel_filter_alpha_) * omega_filtered_;
+        }
+        odom.twist.twist.angular.x = omega_filtered_(0);
+        odom.twist.twist.angular.y = omega_filtered_(1);
+        odom.twist.twist.angular.z = omega_filtered_(2);
 
         pubOdomAftMapped_->publish(odom);
 
@@ -1242,6 +1267,13 @@ private:
     string odom_frame_;
     string body_frame_;
     bool tf_pub_en_ = true;
+    double vel_filter_alpha_ = 1.0;
+    V3D vel_filtered_ = V3D::Zero();
+    V3D omega_filtered_ = V3D::Zero();
+    bool vel_filter_init_ = false;
+    bool omega_filter_init_ = false;
+    Eigen::Quaterniond q_filtered_ = Eigen::Quaterniond::Identity();
+    bool quat_filter_init_ = false;
     bool effect_pub_en = false, map_pub_en = false;
     int effect_feat_num = 0, frame_num = 0;
     double deltaT, deltaR, aver_time_consu = 0, aver_time_icp = 0, aver_time_match = 0, aver_time_incre = 0, aver_time_solve = 0, aver_time_const_H_time = 0;
@@ -1296,7 +1328,7 @@ int main(int argc, char** argv)
 
     if (runtime_pos_log)
     {
-        vector<double> t, s_vec, s_vec2, s_vec3, s_vec4, s_vec5, s_vec6, s_vec7;    
+        vector<double> t, s_vec, s_vec2, s_vec3, s_vec4, s_vec5, s_vec6, s_vec7;
         FILE *fp2;
         string log_dir = root_dir + "/Log/fast_lio_time_log.csv";
         fp2 = fopen(log_dir.c_str(),"w");
