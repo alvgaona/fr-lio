@@ -5,7 +5,7 @@
         max_iteration: 3
         filter_size_surf: 0.15
         filter_size_map: 0.5
-        cube_side_length: 1000.0
+        cube_side_length: 100.0
         runtime_pos_log_enable: false
         map_file_path: "./test.pcd"
 
