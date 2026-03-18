@@ -1122,10 +1122,6 @@ private:
         double imu_time = get_time_sec(msg->header.stamp);
         double dt = imu_time - anchor.timestamp;
         if (dt <= 0.0) return;
-        if (dt > 0.5) {
-            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
-                "EKF anchor stale (%.2fs), odom may drift", dt);
-        }
 
         V3D acc_cur(msg->linear_acceleration.x, msg->linear_acceleration.y, msg->linear_acceleration.z);
         V3D gyr_cur(msg->angular_velocity.x, msg->angular_velocity.y, msg->angular_velocity.z);
@@ -1137,6 +1133,16 @@ private:
         V3D prop_pos = anchor.pos + anchor.vel * dt + 0.5 * a_world * dt * dt;
         V3D prop_vel = anchor.vel + a_world * dt;
         M3D prop_rot = anchor.rot * Exp(omega, dt);
+
+        if (dt > 0.5) {
+            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                "EKF anchor stale (%.2fs), chaining IMU propagation", dt);
+            std::lock_guard<std::mutex> lock(mtx_fwd_prop);
+            fwd_prop_anchor.pos = prop_pos;
+            fwd_prop_anchor.vel = prop_vel;
+            fwd_prop_anchor.rot = prop_rot;
+            fwd_prop_anchor.timestamp = imu_time;
+        }
 
         Eigen::Quaterniond q(prop_rot);
         q.normalize();
