@@ -1019,15 +1019,17 @@ private:
 
             {
                 std::lock_guard<std::mutex> lock(mtx_fwd_prop);
-                fwd_prop_anchor.pos = state_point.pos;
-                fwd_prop_anchor.vel = state_point.vel;
-                fwd_prop_anchor.rot = state_point.rot.toRotationMatrix();
+                if (lidar_end_time > fwd_prop_anchor.timestamp) {
+                    fwd_prop_anchor.pos = state_point.pos;
+                    fwd_prop_anchor.vel = state_point.vel;
+                    fwd_prop_anchor.rot = state_point.rot.toRotationMatrix();
+                    fwd_prop_anchor.timestamp = lidar_end_time;
+                }
                 fwd_prop_anchor.bg  = state_point.bg;
                 fwd_prop_anchor.ba  = state_point.ba;
                 fwd_prop_anchor.grav = V3D(state_point.grav[0],
                                            state_point.grav[1],
                                            state_point.grav[2]);
-                fwd_prop_anchor.timestamp = lidar_end_time;
                 fwd_prop_anchor.P = kf.get_P();
                 fwd_prop_anchor.valid = true;
             }
