@@ -378,6 +378,17 @@ bool sync_packages(MeasureGroup &meas)
         return false;
     }
 
+    /*** drop stale scans — keep only the latest to stay near real-time ***/
+    if (lidar_buffer.size() > 1)
+    {
+        lidar_pushed = false;
+        while (lidar_buffer.size() > 1)
+        {
+            lidar_buffer.pop_front();
+            time_buffer.pop_front();
+        }
+    }
+
     /*** push a lidar scan ***/
     if(!lidar_pushed)
     {
