@@ -31,6 +31,7 @@
             fov_degree:    360.0
             det_range:     100.0
             extrinsic_est_en:  true      # true: enable the online estimation of IMU-LiDAR extrinsic
+            use_fej: false               # true: use First-Estimates Jacobian for observability consistency
             extrinsic_T: [ -0.011, -0.02329, 0.04412 ]
             extrinsic_R: [ 1., 0., 0.,
                             0., 1., 0.,
