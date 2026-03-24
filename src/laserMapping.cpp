@@ -74,6 +74,13 @@ double T1[MAXN], s_plot[MAXN], s_plot2[MAXN], s_plot3[MAXN], s_plot4[MAXN], s_pl
 double match_time = 0, solve_time = 0, solve_const_H_time = 0;
 int    kdtree_size_st = 0, kdtree_size_end = 0, add_point_size = 0, kdtree_delete_counter = 0;
 bool   runtime_pos_log = false, pcd_save_en = false, time_sync_en = false, extrinsic_est_en = true, path_en = true, use_fej = false;
+bool use_scan_to_scan_cov = false;
+PointCloudXYZI::Ptr feats_down_body_prev(new PointCloudXYZI());
+pcl::KdTreeFLANN<PointType> kdtree_prev_scan;
+bool prev_scan_valid = false;
+M3D R_prev_s2s = M3D::Identity();
+V3D t_prev_s2s = V3D::Zero();
+Eigen::Matrix<double, 6, 6> P_drift = Eigen::Matrix<double, 6, 6>::Zero();
 /**************************/
 
 float res_last[100000] = {0.0};
@@ -437,6 +444,87 @@ bool sync_packages(MeasureGroup &meas)
     return true;
 }
 
+void compute_scan_to_scan_covariance(
+    const PointCloudXYZI::Ptr &curr_scan,
+    const M3D &R_curr, const V3D &t_curr,
+    Eigen::Matrix<double, 6, 6> &P_rel_out)
+{
+    P_rel_out.setZero();
+    if (!prev_scan_valid || curr_scan->empty() || feats_down_body_prev->empty())
+        return;
+
+    M3D R_rel = R_prev_s2s.transpose() * R_curr;
+    V3D t_rel = R_prev_s2s.transpose() * (t_curr - t_prev_s2s);
+
+    int max_points = std::min((int)curr_scan->size(), 300);
+    int valid_count = 0;
+    double residual_sum_sq = 0.0;
+
+    Eigen::MatrixXd J(max_points, 6);
+    J.setZero();
+
+    for (int i = 0; i < max_points; i++) {
+        V3D p_cur(curr_scan->points[i].x,
+                  curr_scan->points[i].y,
+                  curr_scan->points[i].z);
+        V3D p_in_prev = R_rel * p_cur + t_rel;
+
+        PointType query;
+        query.x = p_in_prev(0);
+        query.y = p_in_prev(1);
+        query.z = p_in_prev(2);
+
+        std::vector<int> nn_idx(NUM_MATCH_POINTS);
+        std::vector<float> nn_dist(NUM_MATCH_POINTS);
+        if (kdtree_prev_scan.nearestKSearch(query, NUM_MATCH_POINTS, nn_idx, nn_dist) < NUM_MATCH_POINTS)
+            continue;
+        if (nn_dist[NUM_MATCH_POINTS - 1] > 5.0)
+            continue;
+
+        PointVector neighbors(NUM_MATCH_POINTS);
+        for (int k = 0; k < NUM_MATCH_POINTS; k++)
+            neighbors[k] = feats_down_body_prev->points[nn_idx[k]];
+
+        VF(4) pabcd;
+        if (!esti_plane(pabcd, neighbors, 0.1f))
+            continue;
+
+        V3D n(pabcd(0), pabcd(1), pabcd(2));
+        double residual = pabcd(0) * p_in_prev(0) + pabcd(1) * p_in_prev(1) + pabcd(2) * p_in_prev(2) + pabcd(3);
+        residual_sum_sq += residual * residual;
+
+        M3D skew_p;
+        skew_p << SKEW_SYM_MATRX(p_cur);
+
+        J.block<1,3>(valid_count, 0) = n.transpose();
+        J.block<1,3>(valid_count, 3) = -n.transpose() * R_rel * skew_p;
+
+        valid_count++;
+    }
+
+    if (valid_count < 7) return;
+
+    double R_s2s = residual_sum_sq / (valid_count - 6);
+
+    Eigen::MatrixXd J_valid = J.topRows(valid_count);
+    Eigen::Matrix<double, 6, 6> FIM = J_valid.transpose() * J_valid;
+
+    Eigen::SelfAdjointEigenSolver<Eigen::Matrix<double, 6, 6>> solver(FIM);
+    Eigen::Matrix<double, 6, 1> eigenvalues = solver.eigenvalues();
+    Eigen::Matrix<double, 6, 6> eigenvectors = solver.eigenvectors();
+
+    double min_eigenvalue = 1e-6;
+    Eigen::Matrix<double, 6, 1> inv_eigenvalues;
+    for (int i = 0; i < 6; i++) {
+        if (eigenvalues(i) > min_eigenvalue)
+            inv_eigenvalues(i) = 1.0 / eigenvalues(i);
+        else
+            inv_eigenvalues(i) = 0.0;
+    }
+
+    P_rel_out = R_s2s * eigenvectors * inv_eigenvalues.asDiagonal() * eigenvectors.transpose();
+}
+
 int process_increments = 0;
 void map_incremental()
 {
@@ -670,6 +758,7 @@ public:
         this->declare_parameter<bool>("runtime_pos_log_enable", false);
         this->declare_parameter<bool>("mapping.extrinsic_est_en", true);
         this->declare_parameter<bool>("mapping.use_fej", false);
+        this->declare_parameter<bool>("mapping.use_scan_to_scan_cov", false);
         this->declare_parameter<bool>("pcd_save.pcd_save_en", false);
         this->declare_parameter<int>("pcd_save.interval", -1);
         this->declare_parameter<vector<double>>("mapping.extrinsic_T", vector<double>());
@@ -712,6 +801,7 @@ public:
         this->get_parameter_or<bool>("runtime_pos_log_enable", runtime_pos_log, 0);
         this->get_parameter_or<bool>("mapping.extrinsic_est_en", extrinsic_est_en, true);
         this->get_parameter_or<bool>("mapping.use_fej", use_fej, false);
+        this->get_parameter_or<bool>("mapping.use_scan_to_scan_cov", use_scan_to_scan_cov, false);
         this->get_parameter_or<bool>("pcd_save.pcd_save_en", pcd_save_en, false);
         this->get_parameter_or<int>("pcd_save.interval", pcd_save_interval, -1);
         this->get_parameter_or<vector<double>>("mapping.extrinsic_T", extrinT, vector<double>());
@@ -741,6 +831,7 @@ public:
         RCLCPP_INFO(this->get_logger(), "mapping.b_acc_cov: %f", b_acc_cov);
         RCLCPP_INFO(this->get_logger(), "mapping.extrinsic_est_en: %d", extrinsic_est_en);
         RCLCPP_INFO(this->get_logger(), "mapping.use_fej: %d", use_fej);
+        RCLCPP_INFO(this->get_logger(), "mapping.use_scan_to_scan_cov: %d", use_scan_to_scan_cov);
         RCLCPP_INFO(this->get_logger(), "mapping.extrinsic_T: [%f, %f, %f]", extrinT[0], extrinT[1], extrinT[2]);
         RCLCPP_INFO(this->get_logger(), "publish.path_en: %d", path_en);
         RCLCPP_INFO(this->get_logger(), "publish.scan_publish_en: %d", scan_pub_en);
@@ -1021,6 +1112,21 @@ private:
             geoQuat.z = state_point.rot.coeffs()[2];
             geoQuat.w = state_point.rot.coeffs()[3];
 
+            if (use_scan_to_scan_cov && flg_EKF_inited) {
+                M3D R_curr = state_point.rot.toRotationMatrix();
+                V3D t_curr = state_point.pos;
+
+                Eigen::Matrix<double, 6, 6> P_rel;
+                compute_scan_to_scan_covariance(feats_down_body, R_curr, t_curr, P_rel);
+                P_drift += P_rel;
+
+                *feats_down_body_prev = *feats_down_body;
+                kdtree_prev_scan.setInputCloud(feats_down_body_prev);
+                R_prev_s2s = R_curr;
+                t_prev_s2s = t_curr;
+                prev_scan_valid = true;
+            }
+
             double t_update_end = omp_get_wtime();
 
             {
@@ -1037,6 +1143,10 @@ private:
                                            state_point.grav[1],
                                            state_point.grav[2]);
                 fwd_prop_anchor.P = kf.get_P();
+                if (use_scan_to_scan_cov && prev_scan_valid) {
+                    fwd_prop_anchor.P.block<3,3>(0,0) += P_drift.block<3,3>(0,0);
+                    fwd_prop_anchor.P.block<3,3>(3,3) += P_drift.block<3,3>(3,3);
+                }
                 fwd_prop_anchor.valid = true;
             }
 
@@ -1049,6 +1159,15 @@ private:
             if (scan_pub_en) publish_frame_world();
             if (scan_pub_en && scan_body_pub_en) publish_frame_body();
             if (effect_pub_en) publish_effect_world();
+
+            if (use_scan_to_scan_cov && prev_scan_valid) {
+                RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
+                    "S2S drift - P_filter: %.6f, P_drift_pos: %.6f, P_drift_rot: %.6f, P_published: %.6f",
+                    kf.get_P().block<3,3>(0,0).trace(),
+                    P_drift.block<3,3>(0,0).trace(),
+                    P_drift.block<3,3>(3,3).trace(),
+                    fwd_prop_anchor.P.block<3,3>(0,0).trace());
+            }
 
             /*** Debug variables ***/
             if (runtime_pos_log)
