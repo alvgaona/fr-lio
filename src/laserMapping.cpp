@@ -73,8 +73,10 @@ double kdtree_incremental_time = 0.0, kdtree_search_time = 0.0, kdtree_delete_ti
 double T1[MAXN], s_plot[MAXN], s_plot2[MAXN], s_plot3[MAXN], s_plot4[MAXN], s_plot5[MAXN], s_plot6[MAXN], s_plot7[MAXN], s_plot8[MAXN], s_plot9[MAXN], s_plot10[MAXN], s_plot11[MAXN];
 double match_time = 0, solve_time = 0, solve_const_H_time = 0;
 int    kdtree_size_st = 0, kdtree_size_end = 0, add_point_size = 0, kdtree_delete_counter = 0;
-bool   runtime_pos_log = false, pcd_save_en = false, time_sync_en = false, extrinsic_est_en = true, path_en = true, use_fej = false;
+bool   runtime_pos_log = false, pcd_save_en = false, time_sync_en = false, extrinsic_est_en = true, path_en = true;
 bool use_scan_to_scan_cov = false;
+bool degen_check_en = false;
+double degen_threshold = 100.0;
 PointCloudXYZI::Ptr feats_down_body_prev(new PointCloudXYZI());
 pcl::KdTreeFLANN<PointType> kdtree_prev_scan;
 bool prev_scan_valid = false;
@@ -642,7 +644,7 @@ void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_
             float pd2 = pabcd(0) * point_world.x + pabcd(1) * point_world.y + pabcd(2) * point_world.z + pabcd(3);
             float s = 1 - 0.9 * fabs(pd2) / sqrt(p_body.norm());
 
-            if (s > 0.9 || (ekfom_data.fej_lock_points && !ekfom_data.converge))
+            if (s > 0.9)
             {
                 point_selected_surf[i] = true;
                 normvec->points[i].x = pabcd(0);
@@ -757,7 +759,6 @@ public:
         this->declare_parameter<bool>("feature_extract_enable", false);
         this->declare_parameter<bool>("runtime_pos_log_enable", false);
         this->declare_parameter<bool>("mapping.extrinsic_est_en", true);
-        this->declare_parameter<bool>("mapping.use_fej", false);
         this->declare_parameter<bool>("mapping.use_scan_to_scan_cov", false);
         this->declare_parameter<bool>("pcd_save.pcd_save_en", false);
         this->declare_parameter<int>("pcd_save.interval", -1);
@@ -800,8 +801,9 @@ public:
         this->get_parameter_or<bool>("feature_extract_enable", p_pre->feature_enabled, false);
         this->get_parameter_or<bool>("runtime_pos_log_enable", runtime_pos_log, 0);
         this->get_parameter_or<bool>("mapping.extrinsic_est_en", extrinsic_est_en, true);
-        this->get_parameter_or<bool>("mapping.use_fej", use_fej, false);
         this->get_parameter_or<bool>("mapping.use_scan_to_scan_cov", use_scan_to_scan_cov, false);
+        this->get_parameter_or<bool>("mapping.degen_check_en", degen_check_en, false);
+        this->get_parameter_or<double>("mapping.degen_threshold", degen_threshold, 100.0);
         this->get_parameter_or<bool>("pcd_save.pcd_save_en", pcd_save_en, false);
         this->get_parameter_or<int>("pcd_save.interval", pcd_save_interval, -1);
         this->get_parameter_or<vector<double>>("mapping.extrinsic_T", extrinT, vector<double>());
@@ -830,7 +832,6 @@ public:
         RCLCPP_INFO(this->get_logger(), "mapping.b_gyr_cov: %f", b_gyr_cov);
         RCLCPP_INFO(this->get_logger(), "mapping.b_acc_cov: %f", b_acc_cov);
         RCLCPP_INFO(this->get_logger(), "mapping.extrinsic_est_en: %d", extrinsic_est_en);
-        RCLCPP_INFO(this->get_logger(), "mapping.use_fej: %d", use_fej);
         RCLCPP_INFO(this->get_logger(), "mapping.use_scan_to_scan_cov: %d", use_scan_to_scan_cov);
         RCLCPP_INFO(this->get_logger(), "mapping.extrinsic_T: [%f, %f, %f]", extrinT[0], extrinT[1], extrinT[2]);
         RCLCPP_INFO(this->get_logger(), "publish.path_en: %d", path_en);
@@ -871,6 +872,7 @@ public:
 
         fill(epsi, epsi+23, 0.001);
         kf.init_dyn_share(get_f, df_dx, df_dw, h_share_model, NUM_MAX_ITERATIONS, epsi);
+        kf.set_degen(degen_check_en, degen_threshold);
 
         /*** debug record ***/
         // FILE *fp;
@@ -1100,10 +1102,13 @@ private:
             /*** iterated state estimation ***/
             double t_update_start = omp_get_wtime();
             double solve_H_time = 0;
-            if (use_fej)
-                kf.update_iterated_dyn_share_modified_fej(LASER_POINT_COV, solve_H_time);
-            else
-                kf.update_iterated_dyn_share_modified(LASER_POINT_COV, solve_H_time);
+            kf.update_iterated_dyn_share_modified(LASER_POINT_COV, solve_H_time);
+
+            if (degen_check_en && kf.get_degen_dim() > 0) {
+                RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+                    "Degeneracy: %d/12 directions degenerate", kf.get_degen_dim());
+            }
+
             state_point = kf.get_x();
             euler_cur = SO3ToEuler(state_point.rot);
             pos_lid = state_point.pos + state_point.rot * state_point.offset_T_L_I;
