@@ -81,7 +81,6 @@ struct dyn_share_datastruct
 {
 	bool valid;
 	bool converge;
-	bool fej_lock_points;
 	Eigen::Matrix<T, Eigen::Dynamic, 1> z;
 	Eigen::Matrix<T, Eigen::Dynamic, 1> h;
 	Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic> h_v;
@@ -1622,7 +1621,6 @@ public:
 		dyn_share_datastruct<scalar_type> dyn_share;
 		dyn_share.valid = true;
 		dyn_share.converge = true;
-		dyn_share.fej_lock_points = false;
 		int t = 0;
 		state x_propagated = x_;
 		cov P_propagated = P_;
@@ -1722,21 +1720,13 @@ public:
 				//K_temp += R_temp;
 				Eigen::Matrix<scalar_type, Eigen::Dynamic, Eigen::Dynamic> h_x_cur = Eigen::Matrix<scalar_type, Eigen::Dynamic, Eigen::Dynamic>::Zero(dof_Measurement, n);
 				h_x_cur.topLeftCorner(dof_Measurement, 12) = h_x_;
-				/*
-				h_x_cur.col(0) = h_x_.col(0);
-				h_x_cur.col(1) = h_x_.col(1);
-				h_x_cur.col(2) = h_x_.col(2);
-				h_x_cur.col(3) = h_x_.col(3);
-				h_x_cur.col(4) = h_x_.col(4);
-				h_x_cur.col(5) = h_x_.col(5);
-				h_x_cur.col(6) = h_x_.col(6);
-				h_x_cur.col(7) = h_x_.col(7);
-				h_x_cur.col(8) = h_x_.col(8);
-				h_x_cur.col(9) = h_x_.col(9);
-				h_x_cur.col(10) = h_x_.col(10);
-				h_x_cur.col(11) = h_x_.col(11);
-				*/
-				
+
+				if (degen_en_) {
+					Eigen::Matrix<scalar_type, 12, 12> HTH = h_x_.transpose() * h_x_;
+					apply_degen_projection(h_x_, HTH, R);
+					h_x_cur.topLeftCorner(dof_Measurement, 12) = h_x_;
+				}
+
 				Matrix<scalar_type, Eigen::Dynamic, Eigen::Dynamic> K_ = P_ * h_x_cur.transpose() * (h_x_cur * P_ * h_x_cur.transpose()/R + Eigen::Matrix<double, Dynamic, Dynamic>::Identity(dof_Measurement, dof_Measurement)).inverse()/R;
 				K_h = K_ * dyn_share.h;
 				K_x = K_ * h_x_cur;
@@ -1782,8 +1772,10 @@ public:
 				*/
 			#else
 				cov P_temp = (P_/R).inverse();
-				//Eigen::Matrix<scalar_type, 12, Eigen::Dynamic> h_T = h_x_.transpose();
-				Eigen::Matrix<scalar_type, 12, 12> HTH = h_x_.transpose() * h_x_; 
+				Eigen::Matrix<scalar_type, 12, 12> HTH = h_x_.transpose() * h_x_;
+				if (degen_en_) {
+					apply_degen_projection(h_x_, HTH, R);
+				}
 				P_temp. template block<12, 12>(0, 0) += HTH;
 				/*
 				Eigen::Matrix<scalar_type, Eigen::Dynamic, Eigen::Dynamic> h_x_cur = Eigen::Matrix<scalar_type, Eigen::Dynamic, Eigen::Dynamic>::Zero(dof_Measurement, n);
@@ -1932,210 +1924,6 @@ public:
 		}
 	}
 
-	void update_iterated_dyn_share_modified_fej(double R, double &solve_time) {
-
-		dyn_share_datastruct<scalar_type> dyn_share;
-		dyn_share.valid = true;
-		dyn_share.converge = true;
-		dyn_share.fej_lock_points = true;
-		int t = 0;
-		state x_propagated = x_;
-		cov P_propagated = P_;
-		int dof_Measurement;
-
-		Matrix<scalar_type, n, 1> K_h;
-		Matrix<scalar_type, n, n> K_x;
-
-		Eigen::Matrix<scalar_type, Eigen::Dynamic, 12> h_x_fej;
-		Eigen::Matrix<scalar_type, 12, 12> HTH_fej;
-		int dof_fej = 0;
-		bool fej_captured = false;
-
-		vectorized_state dx_new = vectorized_state::Zero();
-		for(int i=-1; i<maximum_iter; i++)
-		{
-			dyn_share.valid = true;
-			h_dyn_share(x_, dyn_share);
-
-			if(! dyn_share.valid)
-			{
-				continue;
-			}
-
-			#ifdef USE_sparse
-				spMt h_x_ = dyn_share.h_x.sparseView();
-			#else
-				Eigen::Matrix<scalar_type, Eigen::Dynamic, 12> h_x_ = dyn_share.h_x;
-			#endif
-			double solve_start = omp_get_wtime();
-			dof_Measurement = h_x_.rows();
-
-			if (!fej_captured) {
-				h_x_fej = h_x_;
-				dof_fej = dof_Measurement;
-				HTH_fej = h_x_fej.transpose() * h_x_fej;
-				fej_captured = true;
-			}
-
-			if (dof_Measurement != dof_fej) {
-				h_x_fej = h_x_;
-				dof_fej = dof_Measurement;
-				HTH_fej = h_x_fej.transpose() * h_x_fej;
-			}
-
-			vectorized_state dx;
-			x_.boxminus(dx, x_propagated);
-			dx_new = dx;
-
-			P_ = P_propagated;
-
-			Matrix<scalar_type, 3, 3> res_temp_SO3;
-			MTK::vect<3, scalar_type> seg_SO3;
-			for (std::vector<std::pair<int, int> >::iterator it = x_.SO3_state.begin(); it != x_.SO3_state.end(); it++) {
-				int idx = (*it).first;
-				int dim = (*it).second;
-				for(int i = 0; i < 3; i++){
-					seg_SO3(i) = dx(idx+i);
-				}
-
-				res_temp_SO3 = MTK::A_matrix(seg_SO3).transpose();
-				dx_new.template block<3, 1>(idx, 0) = res_temp_SO3 * dx_new.template block<3, 1>(idx, 0);
-				for(int i = 0; i < n; i++){
-					P_. template block<3, 1>(idx, i) = res_temp_SO3 * (P_. template block<3, 1>(idx, i));
-				}
-				for(int i = 0; i < n; i++){
-					P_. template block<1, 3>(i, idx) =(P_. template block<1, 3>(i, idx)) *  res_temp_SO3.transpose();
-				}
-			}
-
-			Matrix<scalar_type, 2, 2> res_temp_S2;
-			MTK::vect<2, scalar_type> seg_S2;
-			for (std::vector<std::pair<int, int> >::iterator it = x_.S2_state.begin(); it != x_.S2_state.end(); it++) {
-				int idx = (*it).first;
-				int dim = (*it).second;
-				for(int i = 0; i < 2; i++){
-					seg_S2(i) = dx(idx + i);
-				}
-
-				Eigen::Matrix<scalar_type, 2, 3> Nx;
-				Eigen::Matrix<scalar_type, 3, 2> Mx;
-				x_.S2_Nx_yy(Nx, idx);
-				x_propagated.S2_Mx(Mx, seg_S2, idx);
-				res_temp_S2 = Nx * Mx;
-				dx_new.template block<2, 1>(idx, 0) = res_temp_S2 * dx_new.template block<2, 1>(idx, 0);
-				for(int i = 0; i < n; i++){
-					P_. template block<2, 1>(idx, i) = res_temp_S2 * (P_. template block<2, 1>(idx, i));
-				}
-				for(int i = 0; i < n; i++){
-					P_. template block<1, 2>(i, idx) = (P_. template block<1, 2>(i, idx)) * res_temp_S2.transpose();
-				}
-			}
-
-			if(n > dof_Measurement)
-			{
-				Eigen::Matrix<scalar_type, Eigen::Dynamic, Eigen::Dynamic> h_x_cur = Eigen::Matrix<scalar_type, Eigen::Dynamic, Eigen::Dynamic>::Zero(dof_fej, n);
-				h_x_cur.topLeftCorner(dof_fej, 12) = h_x_fej;
-
-				Matrix<scalar_type, Eigen::Dynamic, Eigen::Dynamic> K_ = P_ * h_x_cur.transpose() * (h_x_cur * P_ * h_x_cur.transpose()/R + Eigen::Matrix<double, Dynamic, Dynamic>::Identity(dof_fej, dof_fej)).inverse()/R;
-				K_h = K_ * dyn_share.h;
-				K_x = K_ * h_x_cur;
-			}
-			else
-			{
-			#ifdef USE_sparse
-				spMt A = h_x_fej.transpose() * h_x_fej;
-				cov P_temp = (P_/R).inverse();
-				P_temp. template block<12, 12>(0, 0) += A;
-				P_temp = P_temp.inverse();
-				K_ = P_temp. template block<n, 12>(0, 0) * h_x_fej.transpose();
-				K_x = cov::Zero();
-				K_x. template block<n, 12>(0, 0) = P_temp. template block<n, 12>(0, 0) * A;
-			#else
-				cov P_temp = (P_/R).inverse();
-				P_temp. template block<12, 12>(0, 0) += HTH_fej;
-				cov P_inv = P_temp.inverse();
-				K_h = P_inv. template block<n, 12>(0, 0) * h_x_fej.transpose() * dyn_share.h;
-				K_x.setZero();
-				K_x. template block<n, 12>(0, 0) = P_inv. template block<n, 12>(0, 0) * HTH_fej;
-			#endif
-			}
-
-			Matrix<scalar_type, n, 1> dx_ = K_h + (K_x - Matrix<scalar_type, n, n>::Identity()) * dx_new;
-			state x_before = x_;
-			x_.boxplus(dx_);
-			dyn_share.converge = true;
-			for(int i = 0; i < n ; i++)
-			{
-				if(std::fabs(dx_[i]) > limit[i])
-				{
-					dyn_share.converge = false;
-					break;
-				}
-			}
-			if(dyn_share.converge) t++;
-
-			if(!t && i == maximum_iter - 2)
-			{
-				dyn_share.converge = true;
-			}
-
-			if(t > 1 || i == maximum_iter - 1)
-			{
-				L_ = P_;
-				Matrix<scalar_type, 3, 3> res_temp_SO3;
-				MTK::vect<3, scalar_type> seg_SO3;
-				for(typename std::vector<std::pair<int, int> >::iterator it = x_.SO3_state.begin(); it != x_.SO3_state.end(); it++) {
-					int idx = (*it).first;
-					for(int i = 0; i < 3; i++){
-						seg_SO3(i) = dx_(i + idx);
-					}
-					res_temp_SO3 = MTK::A_matrix(seg_SO3).transpose();
-					for(int i = 0; i < n; i++){
-						L_. template block<3, 1>(idx, i) = res_temp_SO3 * (P_. template block<3, 1>(idx, i));
-					}
-					for(int i = 0; i < 12; i++){
-						K_x. template block<3, 1>(idx, i) = res_temp_SO3 * (K_x. template block<3, 1>(idx, i));
-					}
-					for(int i = 0; i < n; i++){
-						L_. template block<1, 3>(i, idx) = (L_. template block<1, 3>(i, idx)) * res_temp_SO3.transpose();
-						P_. template block<1, 3>(i, idx) = (P_. template block<1, 3>(i, idx)) * res_temp_SO3.transpose();
-					}
-				}
-
-				Matrix<scalar_type, 2, 2> res_temp_S2;
-				MTK::vect<2, scalar_type> seg_S2;
-				for(typename std::vector<std::pair<int, int> >::iterator it = x_.S2_state.begin(); it != x_.S2_state.end(); it++) {
-					int idx = (*it).first;
-
-					for(int i = 0; i < 2; i++){
-						seg_S2(i) = dx_(i + idx);
-					}
-
-					Eigen::Matrix<scalar_type, 2, 3> Nx;
-					Eigen::Matrix<scalar_type, 3, 2> Mx;
-					x_.S2_Nx_yy(Nx, idx);
-					x_propagated.S2_Mx(Mx, seg_S2, idx);
-					res_temp_S2 = Nx * Mx;
-					for(int i = 0; i < n; i++){
-						L_. template block<2, 1>(idx, i) = res_temp_S2 * (P_. template block<2, 1>(idx, i));
-					}
-					for(int i = 0; i < 12; i++){
-						K_x. template block<2, 1>(idx, i) = res_temp_S2 * (K_x. template block<2, 1>(idx, i));
-					}
-					for(int i = 0; i < n; i++){
-						L_. template block<1, 2>(i, idx) = (L_. template block<1, 2>(i, idx)) * res_temp_S2.transpose();
-						P_. template block<1, 2>(i, idx) = (P_. template block<1, 2>(i, idx)) * res_temp_S2.transpose();
-					}
-				}
-
-				P_ = L_ - K_x.template block<n, 12>(0, 0) * P_.template block<12, n>(0, 0);
-				solve_time += omp_get_wtime() - solve_start;
-				return;
-			}
-			solve_time += omp_get_wtime() - solve_start;
-		}
-	}
-
 	void change_x(state &input_state)
 	{
 		x_ = input_state;
@@ -2158,7 +1946,41 @@ public:
 	const cov& get_P() const {
 		return P_;
 	}
+
+	void set_degen(bool en, double threshold) {
+		degen_en_ = en;
+		degen_threshold_ = threshold;
+	}
+
+	int get_degen_dim() const { return degen_dim_; }
+
+	const Eigen::Matrix<scalar_type, 12, 1>& get_degen_eigenvalues() const {
+		return degen_eigenvalues_;
+	}
+
 private:
+	void apply_degen_projection(
+		Eigen::Matrix<scalar_type, Eigen::Dynamic, 12>& h_x,
+		Eigen::Matrix<scalar_type, 12, 12>& HTH,
+		double R)
+	{
+		Eigen::Matrix<scalar_type, 12, 12> FIM = HTH / R;
+		Eigen::SelfAdjointEigenSolver<Eigen::Matrix<scalar_type, 12, 12>> eig(FIM);
+		degen_eigenvalues_ = eig.eigenvalues();
+
+		Eigen::Matrix<scalar_type, 12, 12> P_well = Eigen::Matrix<scalar_type, 12, 12>::Zero();
+		degen_dim_ = 0;
+		for (int j = 0; j < 12; j++) {
+			if (eig.eigenvalues()(j) >= degen_threshold_)
+				P_well += eig.eigenvectors().col(j) * eig.eigenvectors().col(j).transpose();
+			else
+				degen_dim_++;
+		}
+
+		h_x = h_x * P_well;
+		HTH = P_well * HTH * P_well;
+	}
+
 	state x_;
 	measurement m_;
 	cov P_;
@@ -2186,6 +2008,11 @@ private:
 
 	int maximum_iter = 0;
 	scalar_type limit[n];
+
+	bool degen_en_ = false;
+	double degen_threshold_ = 100.0;
+	int degen_dim_ = 0;
+	Eigen::Matrix<scalar_type, 12, 1> degen_eigenvalues_ = Eigen::Matrix<scalar_type, 12, 1>::Zero();
 	
 	template <typename T>
     T check_safe_update( T _temp_vec )
