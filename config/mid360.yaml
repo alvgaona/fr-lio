@@ -32,8 +32,6 @@
             det_range:     100.0
             extrinsic_est_en:  true      # true: enable the online estimation of IMU-LiDAR extrinsic
             use_scan_to_scan_cov: false  # true: estimate drift covariance from scan-to-scan registration
-            degen_check_en: false        # true: suppress Kalman update along degenerate directions
-            degen_threshold: 100.0       # FIM eigenvalue threshold for degeneracy detection
             extrinsic_T: [ -0.011, -0.02329, 0.04412 ]
             extrinsic_R: [ 1., 0., 0.,
                             0., 1., 0.,

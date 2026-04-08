@@ -75,14 +75,20 @@ double match_time = 0, solve_time = 0, solve_const_H_time = 0;
 int    kdtree_size_st = 0, kdtree_size_end = 0, add_point_size = 0, kdtree_delete_counter = 0;
 bool   runtime_pos_log = false, pcd_save_en = false, time_sync_en = false, extrinsic_est_en = true, path_en = true;
 bool use_scan_to_scan_cov = false;
-bool degen_check_en = false;
-double degen_threshold = 100.0;
 PointCloudXYZI::Ptr feats_down_body_prev(new PointCloudXYZI());
 pcl::KdTreeFLANN<PointType> kdtree_prev_scan;
 bool prev_scan_valid = false;
 M3D R_prev_s2s = M3D::Identity();
 V3D t_prev_s2s = V3D::Zero();
 Eigen::Matrix<double, 6, 6> P_drift = Eigen::Matrix<double, 6, 6>::Zero();
+
+// Scan-to-scan robustness constants (ported from sim_iekf_3d.py)
+static constexpr int    S2S_MIN_VALID_POINTS     = 100;
+static constexpr double S2S_MIN_TRANS_M          = 0.01;
+static constexpr double S2S_MIN_ROT_RAD          = 0.001;
+static constexpr size_t S2S_ADAPTIVE_WINDOW      = 20;
+static constexpr double S2S_ADAPTIVE_REJECT_RATIO = 10.0;
+std::deque<double> s2s_trace_window;
 /**************************/
 
 float res_last[100000] = {0.0};
@@ -504,7 +510,7 @@ void compute_scan_to_scan_covariance(
         valid_count++;
     }
 
-    if (valid_count < 7) return;
+    if (valid_count < S2S_MIN_VALID_POINTS) return;
 
     double R_s2s = residual_sum_sq / (valid_count - 6);
 
@@ -802,8 +808,6 @@ public:
         this->get_parameter_or<bool>("runtime_pos_log_enable", runtime_pos_log, 0);
         this->get_parameter_or<bool>("mapping.extrinsic_est_en", extrinsic_est_en, true);
         this->get_parameter_or<bool>("mapping.use_scan_to_scan_cov", use_scan_to_scan_cov, false);
-        this->get_parameter_or<bool>("mapping.degen_check_en", degen_check_en, false);
-        this->get_parameter_or<double>("mapping.degen_threshold", degen_threshold, 100.0);
         this->get_parameter_or<bool>("pcd_save.pcd_save_en", pcd_save_en, false);
         this->get_parameter_or<int>("pcd_save.interval", pcd_save_interval, -1);
         this->get_parameter_or<vector<double>>("mapping.extrinsic_T", extrinT, vector<double>());
@@ -872,7 +876,6 @@ public:
 
         fill(epsi, epsi+23, 0.001);
         kf.init_dyn_share(get_f, df_dx, df_dw, h_share_model, NUM_MAX_ITERATIONS, epsi);
-        kf.set_degen(degen_check_en, degen_threshold);
 
         /*** debug record ***/
         // FILE *fp;
@@ -1104,11 +1107,6 @@ private:
             double solve_H_time = 0;
             kf.update_iterated_dyn_share_modified(LASER_POINT_COV, solve_H_time);
 
-            if (degen_check_en && kf.get_degen_dim() > 0) {
-                RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
-                    "Degeneracy: %d/12 directions degenerate", kf.get_degen_dim());
-            }
-
             state_point = kf.get_x();
             euler_cur = SO3ToEuler(state_point.rot);
             pos_lid = state_point.pos + state_point.rot * state_point.offset_T_L_I;
@@ -1123,7 +1121,44 @@ private:
 
                 Eigen::Matrix<double, 6, 6> P_rel;
                 compute_scan_to_scan_covariance(feats_down_body, R_curr, t_curr, P_rel);
-                P_drift += P_rel;
+
+                // Motion gating: skip accumulation when stationary (matches sim)
+                bool stationary = false;
+                if (prev_scan_valid) {
+                    V3D dp = t_curr - t_prev_s2s;
+                    M3D dR = R_prev_s2s.transpose() * R_curr;
+                    double dtheta = Eigen::AngleAxisd(dR).angle();
+                    stationary = (dp.norm() < S2S_MIN_TRANS_M) &&
+                                 (std::abs(dtheta) < S2S_MIN_ROT_RAD);
+                }
+
+                // Adaptive rejection: reject if trace(P_rel) > ratio * running median
+                double trace_p_rel = P_rel.trace();
+                bool reject = false;
+                if (s2s_trace_window.size() >= S2S_ADAPTIVE_WINDOW && trace_p_rel > 0.0) {
+                    std::vector<double> sorted(s2s_trace_window.begin(), s2s_trace_window.end());
+                    size_t mid = sorted.size() / 2;
+                    std::nth_element(sorted.begin(), sorted.begin() + mid, sorted.end());
+                    double median = sorted[mid];
+                    if (median > 0.0 && trace_p_rel > S2S_ADAPTIVE_REJECT_RATIO * median) {
+                        reject = true;
+                    }
+                }
+
+                if (!stationary && !reject && trace_p_rel > 0.0) {
+                    // Rotate P_rel from prev-body tangent into world tangent before
+                    // accumulating, so P_drift lives in a single consistent frame.
+                    // Adj = diag(R_prev, R_prev).
+                    Eigen::Matrix<double, 6, 6> Adj_prev = Eigen::Matrix<double, 6, 6>::Zero();
+                    Adj_prev.block<3,3>(0,0) = R_prev_s2s;
+                    Adj_prev.block<3,3>(3,3) = R_prev_s2s;
+                    Eigen::Matrix<double, 6, 6> P_rel_w = Adj_prev * P_rel * Adj_prev.transpose();
+                    P_drift += P_rel_w;
+                    s2s_trace_window.push_back(trace_p_rel);
+                    if (s2s_trace_window.size() > S2S_ADAPTIVE_WINDOW) {
+                        s2s_trace_window.pop_front();
+                    }
+                }
 
                 *feats_down_body_prev = *feats_down_body;
                 kdtree_prev_scan.setInputCloud(feats_down_body_prev);
@@ -1149,8 +1184,15 @@ private:
                                            state_point.grav[2]);
                 fwd_prop_anchor.P = kf.get_P();
                 if (use_scan_to_scan_cov && prev_scan_valid) {
-                    fwd_prop_anchor.P.block<3,3>(0,0) += P_drift.block<3,3>(0,0);
-                    fwd_prop_anchor.P.block<3,3>(3,3) += P_drift.block<3,3>(3,3);
+                    // Rotate P_drift (world tangent) into the current body tangent before
+                    // adding to the published covariance blocks.
+                    M3D R_cur_body = state_point.rot.toRotationMatrix();
+                    Eigen::Matrix<double, 6, 6> Adj_curT = Eigen::Matrix<double, 6, 6>::Zero();
+                    Adj_curT.block<3,3>(0,0) = R_cur_body.transpose();
+                    Adj_curT.block<3,3>(3,3) = R_cur_body.transpose();
+                    Eigen::Matrix<double, 6, 6> P_drift_body = Adj_curT * P_drift * Adj_curT.transpose();
+                    fwd_prop_anchor.P.block<3,3>(0,0) += P_drift_body.block<3,3>(0,0);
+                    fwd_prop_anchor.P.block<3,3>(3,3) += P_drift_body.block<3,3>(3,3);
                 }
                 fwd_prop_anchor.valid = true;
             }
