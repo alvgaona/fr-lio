@@ -88,7 +88,14 @@ static constexpr double S2S_MIN_TRANS_M          = 0.01;
 static constexpr double S2S_MIN_ROT_RAD          = 0.001;
 static constexpr size_t S2S_ADAPTIVE_WINDOW      = 20;
 static constexpr double S2S_ADAPTIVE_REJECT_RATIO = 10.0;
+// Persistence-based discount: fraction of current planes matching a plane used
+// in any of the last N s2s calls -> discount accumulation by (1 - alpha * f).
+static constexpr double S2S_PERSIST_ALPHA        = 1.0;
+static constexpr double S2S_PERSIST_NORMAL_TAU   = 0.95;  // cos(~18 deg)
+static constexpr double S2S_PERSIST_DIST_EPS     = 0.10;  // meters
+static constexpr size_t S2S_PERSIST_HISTORY      = 5;
 std::deque<double> s2s_trace_window;
+std::deque<std::vector<Eigen::Vector4d>> s2s_plane_history;
 /**************************/
 
 float res_last[100000] = {0.0};
@@ -455,9 +462,11 @@ bool sync_packages(MeasureGroup &meas)
 void compute_scan_to_scan_covariance(
     const PointCloudXYZI::Ptr &curr_scan,
     const M3D &R_curr, const V3D &t_curr,
-    Eigen::Matrix<double, 6, 6> &P_rel_out)
+    Eigen::Matrix<double, 6, 6> &P_rel_out,
+    std::vector<Eigen::Vector4d> &planes_world_out)
 {
     P_rel_out.setZero();
+    planes_world_out.clear();
     if (!prev_scan_valid || curr_scan->empty() || feats_down_body_prev->empty())
         return;
 
@@ -498,8 +507,15 @@ void compute_scan_to_scan_covariance(
             continue;
 
         V3D n(pabcd(0), pabcd(1), pabcd(2));
-        double residual = pabcd(0) * p_in_prev(0) + pabcd(1) * p_in_prev(1) + pabcd(2) * p_in_prev(2) + pabcd(3);
+        double d = pabcd(3);
+        double residual = pabcd(0) * p_in_prev(0) + pabcd(1) * p_in_prev(1) + pabcd(2) * p_in_prev(2) + d;
         residual_sum_sq += residual * residual;
+
+        // Plane is expressed in the previous-scan body frame. Transform to world
+        // frame using R_prev_s2s, t_prev_s2s for cross-scan persistence matching.
+        V3D n_w = R_prev_s2s * n;
+        double d_w = d - n_w.dot(t_prev_s2s);
+        planes_world_out.emplace_back(n_w(0), n_w(1), n_w(2), d_w);
 
         M3D skew_p;
         skew_p << SKEW_SYM_MATRX(p_cur);
@@ -510,7 +526,10 @@ void compute_scan_to_scan_covariance(
         valid_count++;
     }
 
-    if (valid_count < S2S_MIN_VALID_POINTS) return;
+    if (valid_count < S2S_MIN_VALID_POINTS) {
+        planes_world_out.clear();
+        return;
+    }
 
     double R_s2s = residual_sum_sq / (valid_count - 6);
 
@@ -1120,7 +1139,37 @@ private:
                 V3D t_curr = state_point.pos;
 
                 Eigen::Matrix<double, 6, 6> P_rel;
-                compute_scan_to_scan_covariance(feats_down_body, R_curr, t_curr, P_rel);
+                std::vector<Eigen::Vector4d> curr_planes_world;
+                compute_scan_to_scan_covariance(feats_down_body, R_curr, t_curr, P_rel, curr_planes_world);
+
+                // Persistence discount: count current planes that also appeared
+                // in any of the last N s2s plane sets (same physical landmarks).
+                double persist_frac = 0.0;
+                if (!s2s_plane_history.empty() && !curr_planes_world.empty()) {
+                    int hits = 0;
+                    for (const auto &pc : curr_planes_world) {
+                        Eigen::Vector3d nc(pc(0), pc(1), pc(2));
+                        double dc = pc(3);
+                        bool matched = false;
+                        for (const auto &old_planes : s2s_plane_history) {
+                            for (const auto &pp : old_planes) {
+                                Eigen::Vector3d np(pp(0), pp(1), pp(2));
+                                double dp = pp(3);
+                                double dot = nc.dot(np);
+                                if (std::abs(dot) < S2S_PERSIST_NORMAL_TAU) continue;
+                                double dp_signed = (dot >= 0.0) ? dp : -dp;
+                                if (std::abs(dc - dp_signed) < S2S_PERSIST_DIST_EPS) {
+                                    matched = true;
+                                    break;
+                                }
+                            }
+                            if (matched) break;
+                        }
+                        if (matched) hits++;
+                    }
+                    persist_frac = static_cast<double>(hits) / curr_planes_world.size();
+                }
+                double persist_scale = std::max(0.0, 1.0 - S2S_PERSIST_ALPHA * persist_frac);
 
                 // Motion gating: skip accumulation when stationary (matches sim)
                 bool stationary = false;
@@ -1148,15 +1197,20 @@ private:
                 if (!stationary && !reject && trace_p_rel > 0.0) {
                     // Rotate P_rel from prev-body tangent into world tangent before
                     // accumulating, so P_drift lives in a single consistent frame.
-                    // Adj = diag(R_prev, R_prev).
                     Eigen::Matrix<double, 6, 6> Adj_prev = Eigen::Matrix<double, 6, 6>::Zero();
                     Adj_prev.block<3,3>(0,0) = R_prev_s2s;
                     Adj_prev.block<3,3>(3,3) = R_prev_s2s;
                     Eigen::Matrix<double, 6, 6> P_rel_w = Adj_prev * P_rel * Adj_prev.transpose();
-                    P_drift += P_rel_w;
+                    P_drift += persist_scale * P_rel_w;
                     s2s_trace_window.push_back(trace_p_rel);
                     if (s2s_trace_window.size() > S2S_ADAPTIVE_WINDOW) {
                         s2s_trace_window.pop_front();
+                    }
+                }
+                if (!curr_planes_world.empty()) {
+                    s2s_plane_history.push_back(std::move(curr_planes_world));
+                    if (s2s_plane_history.size() > S2S_PERSIST_HISTORY) {
+                        s2s_plane_history.pop_front();
                     }
                 }
 
