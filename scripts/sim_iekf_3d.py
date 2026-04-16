@@ -324,8 +324,16 @@ def compute_scan_to_scan_covariance(points_body_curr, R_curr, t_curr,
         d_w = d - float(n_w @ t_prev)
         planes_world.append(np.array([n_w[0], n_w[1], n_w[2], d_w]))
 
+        # Option B: LEFT perturbation convention.
+        # Under R_rel_true = Exp(δθ) · R_rel (δθ expressed in body-{k-1} frame,
+        # same tangent space as the scan-to-scan covariance is reported in),
+        # ∂r/∂δθ = -n^T [R_rel · p]× — note the skew is of the rotated-only
+        # point, NOT of (R_rel p + t_rel); the translation term drops out
+        # because Exp(δθ) is independent of t_rel. See
+        # workspaces/fast_lio_ws/verify_jacobian_conventions.py for numerical
+        # proof (Form B vs finite-difference gradient, max err ~4e-7).
         J[valid_count, 0:3] = normal
-        J[valid_count, 3:6] = -normal @ R_rel @ skew(p_cur)
+        J[valid_count, 3:6] = -normal @ skew(R_rel @ p_cur)
         valid_count += 1
 
     if valid_count < S2S_MIN_VALID_POINTS:
