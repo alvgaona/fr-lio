@@ -517,11 +517,26 @@ void compute_scan_to_scan_covariance(
         double d_w = d - n_w.dot(t_prev_s2s);
         planes_world_out.emplace_back(n_w(0), n_w(1), n_w(2), d_w);
 
-        M3D skew_p;
-        skew_p << SKEW_SYM_MATRX(p_cur);
+        // Option B (left-perturbation on R_rel): delta_theta lives in the
+        // body_{k-1} tangent frame, matching what the block-diagonal adjoint
+        // Adj_prev = diag(R_prev_s2s, R_prev_s2s) (built around lines
+        // 1214-1216 for accumulation, 1258-1260 for publication-time
+        // transport) expects. The rotation Jacobian is therefore
+        // -n^T * [R_rel * p_cur]_x, with the skew outermost.
+        //
+        // Important: the skew is of the ROTATED-only point q = R_rel * p_cur,
+        // NOT of p_in_prev = R_rel * p_cur + t_rel. Using p_in_prev would
+        // inject a spurious point-independent row contribution
+        // -n^T * [t_rel]_x on every valid correspondence.
+        //
+        // See chapter5.tex §"Rotation Jacobian" Remark [Rotated-only vs.
+        // fully transformed point] for the derivation.
+        V3D q = R_rel * p_cur;
+        M3D skew_q;
+        skew_q << SKEW_SYM_MATRX(q);
 
         J.block<1,3>(valid_count, 0) = n.transpose();
-        J.block<1,3>(valid_count, 3) = -n.transpose() * R_rel * skew_p;
+        J.block<1,3>(valid_count, 3) = -n.transpose() * skew_q;
 
         valid_count++;
     }
