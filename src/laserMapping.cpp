@@ -99,9 +99,13 @@ std::deque<std::vector<Eigen::Vector4d>> s2s_plane_history;
 /**************************/
 
 float res_last[100000] = {0.0};
+double per_point_var[100000] = {0.0};
 float DET_RANGE = 300.0f;
 const float MOV_THRESHOLD = 1.5f;
 double time_diff_lidar_to_imu = 0.0;
+bool use_perpoint_cov = false;
+double point_range_noise_std = 0.02;
+double point_range_noise_var = 0.0004;
 
 mutex mtx_buffer;
 condition_variable sig_buffer;
@@ -478,7 +482,9 @@ void compute_scan_to_scan_covariance(
     double residual_sum_sq = 0.0;
 
     Eigen::MatrixXd J(max_points, 6);
+    Eigen::VectorXd per_point_var_s2s(max_points);
     J.setZero();
+    per_point_var_s2s.setZero();
 
     for (int i = 0; i < max_points; i++) {
         V3D p_cur(curr_scan->points[i].x,
@@ -538,6 +544,14 @@ void compute_scan_to_scan_covariance(
         J.block<1,3>(valid_count, 0) = n.transpose();
         J.block<1,3>(valid_count, 3) = -n.transpose() * skew_q;
 
+        if (use_perpoint_cov) {
+            // Per-point variance from k-NN spatial cov of the previous-scan
+            // neighbors. Replaces the lumped scalar R_s2s below.
+            Eigen::Matrix3d sigma_p = compute_neighborhood_cov(neighbors);
+            per_point_var_s2s(valid_count) = point_range_noise_var
+                                             + (n.transpose() * sigma_p * n)(0);
+        }
+
         valid_count++;
     }
 
@@ -546,10 +560,20 @@ void compute_scan_to_scan_covariance(
         return;
     }
 
-    double R_s2s = residual_sum_sq / (valid_count - 6);
-
     Eigen::MatrixXd J_valid = J.topRows(valid_count);
-    Eigen::Matrix<double, 6, 6> FIM = J_valid.transpose() * J_valid;
+    Eigen::Matrix<double, 6, 6> FIM;
+    double R_s2s = 0.0;
+
+    if (use_perpoint_cov) {
+        // FIM = sum_i (1/R_i) J_i^T J_i = J^T diag(1/R_i) J. The per-point variance
+        // captures both sensor range noise and the local plane-fit anisotropy, so no
+        // scalar inflation is needed.
+        Eigen::VectorXd inv_var = per_point_var_s2s.head(valid_count).array().inverse();
+        FIM = J_valid.transpose() * inv_var.asDiagonal() * J_valid;
+    } else {
+        FIM = J_valid.transpose() * J_valid;
+        R_s2s = residual_sum_sq / (valid_count - 6);
+    }
 
     Eigen::SelfAdjointEigenSolver<Eigen::Matrix<double, 6, 6>> solver(FIM);
     Eigen::Matrix<double, 6, 1> eigenvalues = solver.eigenvalues();
@@ -564,7 +588,9 @@ void compute_scan_to_scan_covariance(
             inv_eigenvalues(i) = 0.0;
     }
 
-    P_rel_out = R_s2s * eigenvectors * inv_eigenvalues.asDiagonal() * eigenvectors.transpose();
+    Eigen::Matrix<double, 6, 6> inv_FIM =
+        eigenvectors * inv_eigenvalues.asDiagonal() * eigenvectors.transpose();
+    P_rel_out = use_perpoint_cov ? inv_FIM : (R_s2s * inv_FIM);
 }
 
 int process_increments = 0;
@@ -692,6 +718,19 @@ void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_
                 normvec->points[i].z = pabcd(2);
                 normvec->points[i].intensity = pd2;
                 res_last[i] = abs(pd2);
+                // Per-point measurement variance (GICP-style): sigma_range^2 + n^T Σ_p n.
+                // Σ_p is the 3x3 spatial cov of the same kd-tree neighbors used for plane
+                // fitting. Stash on normvec.curvature; carried through the compaction copy
+                // into corr_normvect, then consumed in the H_x scaling loop below.
+                if (use_perpoint_cov) {
+                    Eigen::Matrix3d sigma_p = compute_neighborhood_cov(points_near);
+                    Eigen::Vector3d n_w(pabcd(0), pabcd(1), pabcd(2));
+                    double R_i = point_range_noise_var
+                                 + (n_w.transpose() * sigma_p * n_w)(0);
+                    normvec->points[i].curvature = static_cast<float>(R_i);
+                } else {
+                    normvec->points[i].curvature = static_cast<float>(LASER_POINT_COV);
+                }
             }
         }
     }
@@ -754,6 +793,17 @@ void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_
 
         /*** Measuremnt: distance to the closest surface/corner ***/
         ekfom_data.h(i) = -norm_p.intensity;
+
+        // Per-point R weighting via row scaling: the IKFoM toolkit takes a scalar R,
+        // so we pre-scale h_x and h by 1/sqrt(R_i). With R passed as 1.0 to the update,
+        // the resulting Kalman gain is mathematically equivalent to using diag(R_i) as
+        // the measurement noise covariance.
+        if (use_perpoint_cov) {
+            const double R_i = static_cast<double>(norm_p.curvature);
+            const double inv_sqrt_r = 1.0 / std::sqrt(R_i);
+            ekfom_data.h_x.row(i) *= inv_sqrt_r;
+            ekfom_data.h(i) *= inv_sqrt_r;
+        }
     }
     solve_time += omp_get_wtime() - solve_start_;
 }
@@ -800,6 +850,8 @@ public:
         this->declare_parameter<bool>("runtime_pos_log_enable", false);
         this->declare_parameter<bool>("mapping.extrinsic_est_en", true);
         this->declare_parameter<bool>("mapping.use_scan_to_scan_cov", false);
+        this->declare_parameter<bool>("mapping.use_perpoint_cov", false);
+        this->declare_parameter<double>("mapping.point_range_noise_std", 0.02);
         this->declare_parameter<bool>("pcd_save.pcd_save_en", false);
         this->declare_parameter<int>("pcd_save.interval", -1);
         this->declare_parameter<vector<double>>("mapping.extrinsic_T", vector<double>());
@@ -842,6 +894,9 @@ public:
         this->get_parameter_or<bool>("runtime_pos_log_enable", runtime_pos_log, 0);
         this->get_parameter_or<bool>("mapping.extrinsic_est_en", extrinsic_est_en, true);
         this->get_parameter_or<bool>("mapping.use_scan_to_scan_cov", use_scan_to_scan_cov, false);
+        this->get_parameter_or<bool>("mapping.use_perpoint_cov", use_perpoint_cov, false);
+        this->get_parameter_or<double>("mapping.point_range_noise_std", point_range_noise_std, 0.02);
+        point_range_noise_var = point_range_noise_std * point_range_noise_std;
         this->get_parameter_or<bool>("pcd_save.pcd_save_en", pcd_save_en, false);
         this->get_parameter_or<int>("pcd_save.interval", pcd_save_interval, -1);
         this->get_parameter_or<vector<double>>("mapping.extrinsic_T", extrinT, vector<double>());
@@ -871,6 +926,8 @@ public:
         RCLCPP_INFO(this->get_logger(), "mapping.b_acc_cov: %f", b_acc_cov);
         RCLCPP_INFO(this->get_logger(), "mapping.extrinsic_est_en: %d", extrinsic_est_en);
         RCLCPP_INFO(this->get_logger(), "mapping.use_scan_to_scan_cov: %d", use_scan_to_scan_cov);
+        RCLCPP_INFO(this->get_logger(), "mapping.use_perpoint_cov: %d", use_perpoint_cov);
+        RCLCPP_INFO(this->get_logger(), "mapping.point_range_noise_std: %f", point_range_noise_std);
         RCLCPP_INFO(this->get_logger(), "mapping.extrinsic_T: [%f, %f, %f]", extrinT[0], extrinT[1], extrinT[2]);
         RCLCPP_INFO(this->get_logger(), "publish.path_en: %d", path_en);
         RCLCPP_INFO(this->get_logger(), "publish.scan_publish_en: %d", scan_pub_en);
@@ -1139,7 +1196,11 @@ private:
             /*** iterated state estimation ***/
             double t_update_start = omp_get_wtime();
             double solve_H_time = 0;
-            kf.update_iterated_dyn_share_modified(LASER_POINT_COV, solve_H_time);
+            // When use_perpoint_cov is on, h_share_model has already pre-scaled h_x and h
+            // by 1/sqrt(R_i), so the effective measurement noise covariance the filter
+            // should use is the identity. Otherwise keep the historical scalar R.
+            const double R_for_filter = use_perpoint_cov ? 1.0 : LASER_POINT_COV;
+            kf.update_iterated_dyn_share_modified(R_for_filter, solve_H_time);
 
             state_point = kf.get_x();
             euler_cur = SO3ToEuler(state_point.rot);
