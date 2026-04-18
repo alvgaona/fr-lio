@@ -59,7 +59,7 @@ print(f"  {len(imu_arr)} IMU samples, {len(lidar_arr)} LiDAR scans")
 print(f"\nRunning IESKF (cube_len={CUBE_LEN:.1f}, bias_walk={BIAS_WALK_POS})...")
 np.random.seed(123)
 (est_poses, est_times, gt_poses, _, _, _, _,
- _, _, _, edge_covs_per_step, _) = run_ieskf_no_lc(imu_data, lidar_data)
+ _, _, _, edge_covs_per_step, _, _, _) = run_ieskf_no_lc(imu_data, lidar_data)
 n = len(est_poses)
 print(f"  {n} keyframes")
 
