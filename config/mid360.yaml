@@ -32,6 +32,8 @@
             det_range:     100.0
             extrinsic_est_en:  true      # true: enable the online estimation of IMU-LiDAR extrinsic
             use_scan_to_scan_cov: false  # true: estimate drift covariance from scan-to-scan registration
+            use_perpoint_cov: false      # true: per-point Σ from k-NN replaces scalar LASER_POINT_COV (and scalar R_s2s when use_scan_to_scan_cov is on)
+            point_range_noise_std: 0.02  # m, sensor range noise (Mid-360 datasheet); used only when use_perpoint_cov is true
             extrinsic_T: [ -0.011, -0.02329, 0.04412 ]
             extrinsic_R: [ 1., 0., 0.,
                             0., 1., 0.,

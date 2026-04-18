@@ -254,6 +254,30 @@ bool esti_plane(Matrix<T, 4, 1> &pca_result, const PointVector &point, const T &
     return true;
 }
 
+// 3x3 spatial covariance of a kd-tree neighborhood, used by per-point R weighting.
+// For tight planar regions the eigenvalue along the plane normal is small, so
+// n^T Σ n is small and the point contributes more information to the IESKF
+// update / scan-to-scan FIM. Edge-of-feature points get larger n^T Σ n and are
+// downweighted automatically.
+inline Eigen::Matrix3d compute_neighborhood_cov(const PointVector &neighbors)
+{
+    Eigen::Matrix3d cov = Eigen::Matrix3d::Zero();
+    const int n = static_cast<int>(neighbors.size());
+    if (n < 2) return cov;
+    Eigen::Vector3d centroid = Eigen::Vector3d::Zero();
+    for (int i = 0; i < n; ++i) {
+        centroid += Eigen::Vector3d(neighbors[i].x, neighbors[i].y, neighbors[i].z);
+    }
+    centroid /= static_cast<double>(n);
+    for (int i = 0; i < n; ++i) {
+        const Eigen::Vector3d c(neighbors[i].x - centroid.x(),
+                                neighbors[i].y - centroid.y(),
+                                neighbors[i].z - centroid.z());
+        cov += c * c.transpose();
+    }
+    return cov / static_cast<double>(n - 1);
+}
+
 double get_time_sec(const builtin_interfaces::msg::Time &time)
 {
     return rclcpp::Time(time).seconds();
