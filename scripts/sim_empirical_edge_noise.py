@@ -67,7 +67,7 @@ print(f"  cube_len={CUBE_LEN}, bias_walk pos={BIAS_WALK_POS}, rot={BIAS_WALK_ROT
 print("\nRunning IESKF...")
 np.random.seed(123)
 (est_poses, est_times, gt_poses, _, _, _, _,
- _, _, _, edge_covs) = run_ieskf_no_lc(imu_data, lidar_data)
+ _, _, _, edge_covs, _) = run_ieskf_no_lc(imu_data, lidar_data)
 n = len(est_poses)
 print(f"  {n} keyframes, {sum(1 for c in edge_covs if c is not None)} valid edges")
 

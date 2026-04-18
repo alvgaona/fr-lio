@@ -246,7 +246,7 @@ if __name__ == "__main__":
     print(f"\nRunning IESKF (cube_len={CUBE_LEN:.1f} m)...")
     np.random.seed(123)
     (est_poses, est_times, gt_poses, _, _, _, _,
-     _, _, _, _) = run_ieskf_no_lc(imu_data, lidar_data)
+     _, _, _, _, _) = run_ieskf_no_lc(imu_data, lidar_data)
     n = len(est_poses)
     print(f"  {n} keyframe poses")
 
