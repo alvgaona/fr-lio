@@ -44,6 +44,7 @@ GYR_BIAS_WALK_STD = np.sqrt(0.0001 * DT_IMU_REF)
 ACC_BIAS_WALK_STD = np.sqrt(0.0001 * DT_IMU_REF)
 
 LIDAR_POINT_VAR = 0.001
+SIGMA_RANGE_PERPOINT = 0.02  # Mid-360 datasheet range noise (m), used by per-point cov
 MAX_PLANE_DIST = 0.5
 # After voxel downsampling, FAST-LIO typically uses a few hundred effective
 # points per IEKF update. 1000 is in line with that.
@@ -237,7 +238,14 @@ def fit_plane(neighbors):
 
 
 def find_correspondences(state, points_body, online_map):
-    """For each body-frame point, find a local plane in the online map."""
+    """For each body-frame point, find a local plane in the online map.
+
+    Returns list of (p_body, normal, d, sigma_p) tuples, where sigma_p is the
+    3x3 spatial covariance of the k-NN neighbors used for plane fitting.
+    sigma_p has a small eigenvalue along the plane normal (good plane => tight
+    weighting along the residual direction) and larger eigenvalues along the
+    surface — used by GICP-style per-point covariance weighting.
+    """
     online_map.build_tree()
     if online_map.tree is None or len(online_map) < NN_K:
         return []
@@ -256,16 +264,25 @@ def find_correspondences(state, points_body, online_map):
         normal, d = plane
         if abs(np.dot(normal, p_world) + d) > MAX_PLANE_DIST:
             continue
-        matches.append((p_body, normal, d))
+        centroid = neighbors.mean(axis=0)
+        centered = neighbors - centroid
+        denom = max(len(neighbors) - 1, 1)
+        sigma_p = (centered.T @ centered) / denom
+        matches.append((p_body, normal, d, sigma_p))
     return matches
 
 
 def compute_residuals_and_H(state, matches):
-    """Compute residual vector h and Jacobian H for the matches."""
+    """Compute residual vector h and Jacobian H for the matches.
+
+    Matches are (p_body, n_w, d_w, sigma_p) — sigma_p is unused here (used by
+    iekf_update for per-point R weighting).
+    """
     n_meas = len(matches)
     h = np.zeros(n_meas)
     H = np.zeros((n_meas, N_STATE_DIM))
-    for i, (p_body, n_w, d_w) in enumerate(matches):
+    for i, m in enumerate(matches):
+        p_body, n_w, d_w = m[0], m[1], m[2]
         p_world = state.R @ p_body + state.p
         h[i] = np.dot(n_w, p_world) + d_w
         H[i, 0:3] = -n_w @ state.R @ skew(p_body)
@@ -274,7 +291,8 @@ def compute_residuals_and_H(state, matches):
 
 
 def compute_scan_to_scan_covariance(points_body_curr, R_curr, t_curr,
-                                    prev_scan_points, prev_tree, R_prev, t_prev):
+                                    prev_scan_points, prev_tree, R_prev, t_prev,
+                                    use_perpoint_cov=False):
     """Compute the Cramer-Rao Lower Bound on the relative pose covariance
     between the current scan and the previous one.
 
@@ -288,15 +306,22 @@ def compute_scan_to_scan_covariance(points_body_curr, R_curr, t_curr,
         prev_scan_points:  (M, 3) array of previous scan points in body frame
         prev_tree:         cKDTree built on prev_scan_points
         R_prev, t_prev:    state estimate when the previous scan was captured
+        use_perpoint_cov:  if True, weight each point's FIM contribution by
+                           1 / (sigma_range^2 + n^T Σ_p n) where Σ_p is the
+                           local k-NN spatial covariance. Replaces the scalar
+                           empirical R_s2s with a per-point variance — gives
+                           a fully data-driven CRLB with no scalar fudge.
     """
     R_rel = R_prev.T @ R_curr
     t_rel = R_prev.T @ (t_curr - t_prev)
 
     max_points = min(len(points_body_curr), S2S_MAX_POINTS)
     J = np.zeros((max_points, 6))
+    per_point_var = np.zeros(max_points)
     residual_sum_sq = 0.0
     valid_count = 0
     planes_world = []
+    sr2 = SIGMA_RANGE_PERPOINT ** 2
 
     for i in range(max_points):
         p_cur = points_body_curr[i]
@@ -317,23 +342,18 @@ def compute_scan_to_scan_covariance(points_body_curr, R_curr, t_curr,
             continue
         residual_sum_sq += residual ** 2
 
-        # Plane in world frame for cross-scan persistence matching.
-        # Plane is native to the previous-scan body frame; world transform:
-        #   n_w = R_prev @ n_local,   d_w = d_local - n_w . t_prev
         n_w = R_prev @ normal
         d_w = d - float(n_w @ t_prev)
         planes_world.append(np.array([n_w[0], n_w[1], n_w[2], d_w]))
 
-        # Option B: LEFT perturbation convention.
-        # Under R_rel_true = Exp(δθ) · R_rel (δθ expressed in body-{k-1} frame,
-        # same tangent space as the scan-to-scan covariance is reported in),
-        # ∂r/∂δθ = -n^T [R_rel · p]× — note the skew is of the rotated-only
-        # point, NOT of (R_rel p + t_rel); the translation term drops out
-        # because Exp(δθ) is independent of t_rel. See
-        # workspaces/fast_lio_ws/verify_jacobian_conventions.py for numerical
-        # proof (Form B vs finite-difference gradient, max err ~4e-7).
         J[valid_count, 0:3] = normal
         J[valid_count, 3:6] = -normal @ skew(R_rel @ p_cur)
+
+        if use_perpoint_cov:
+            centroid = neighbors.mean(axis=0)
+            centered = neighbors - centroid
+            sigma_p = (centered.T @ centered) / max(len(neighbors) - 1, 1)
+            per_point_var[valid_count] = sr2 + float(normal @ sigma_p @ normal)
         valid_count += 1
 
     if valid_count < S2S_MIN_VALID_POINTS:
@@ -344,14 +364,30 @@ def compute_scan_to_scan_covariance(points_body_curr, R_curr, t_curr,
             "planes_world": [],
         }
 
-    R_s2s = residual_sum_sq / (valid_count - 6)
     J_valid = J[:valid_count]
-    FIM = J_valid.T @ J_valid
+
+    if use_perpoint_cov:
+        # FIM = sum_i (1 / r_i^2) J_i J_i^T = J^T diag(1/r^2) J.
+        # No scalar inflation: per-point variance is the noise model.
+        inv_var = 1.0 / per_point_var[:valid_count]
+        FIM = (J_valid.T * inv_var) @ J_valid
+        # For diagnostic compatibility, report effective R_s2s as median
+        # per-point variance (representative scale).
+        R_s2s = float(np.median(per_point_var[:valid_count]))
+    else:
+        FIM = J_valid.T @ J_valid
+        R_s2s = residual_sum_sq / (valid_count - 6)
 
     eigvals, eigvecs = np.linalg.eigh(FIM)
     n_clipped = int(np.sum(eigvals <= S2S_MIN_EIGENVALUE))
     inv_eigvals = np.where(eigvals > S2S_MIN_EIGENVALUE, 1.0 / eigvals, 0.0)
-    P_rel = R_s2s * (eigvecs @ np.diag(inv_eigvals) @ eigvecs.T)
+    inv_FIM = eigvecs @ np.diag(inv_eigvals) @ eigvecs.T
+
+    if use_perpoint_cov:
+        P_rel = inv_FIM
+    else:
+        P_rel = R_s2s * inv_FIM
+
     debug = {
         "valid_count": valid_count,
         "R_s2s": R_s2s,
@@ -402,12 +438,16 @@ def information_weighted_projection(H, P_prior, meas_var=LIDAR_POINT_VAR):
 
 
 def iekf_update(state_prior, P_prior, points_body, online_map, use_fej,
-                use_degen_suppression=False):
+                use_degen_suppression=False, use_perpoint_cov=False):
     """IEKF update with point-to-plane measurements.
 
     If use_fej is True, freezes the measurement Jacobian at the propagated
     prior for the entire update cycle. Otherwise, re-linearizes at every
     iteration (standard IEKF).
+
+    If use_perpoint_cov is True, replaces the scalar LIDAR_POINT_VAR with a
+    per-match variance derived from the local k-NN spatial covariance
+    (GICP-style). Each match's R = sigma_range^2 + n^T Σ_p n.
     """
     matches = find_correspondences(state_prior, points_body, online_map)
     if len(matches) < 5:
@@ -417,7 +457,15 @@ def iekf_update(state_prior, P_prior, points_body, online_map, use_fej,
         idx = np.random.choice(len(matches), MAX_POINTS_PER_SCAN, replace=False)
         matches = [matches[i] for i in idx]
 
-    R_meas = LIDAR_POINT_VAR * np.eye(len(matches))
+    if use_perpoint_cov:
+        sr2 = SIGMA_RANGE_PERPOINT ** 2
+        diag = np.empty(len(matches))
+        for i, m in enumerate(matches):
+            n_w, sigma_p = m[1], m[3]
+            diag[i] = sr2 + float(n_w @ sigma_p @ n_w)
+        R_meas = np.diag(diag)
+    else:
+        R_meas = LIDAR_POINT_VAR * np.eye(len(matches))
 
     H_fej = None
     K_fej = None
@@ -881,28 +929,6 @@ def plot_nees(hist):
               f"in-95={inside:.2%}  below={below:.2%}  above={above:.2%}")
 
 
-print("Loading simulated data...")
-imu_arr = np.load(f"{OUT_DIR}/sim_imu.npy")
-lidar_arr = np.load(f"{OUT_DIR}/sim_lidar.npy", allow_pickle=True)
-print(f"  {len(imu_arr)} IMU samples, {len(lidar_arr)} LiDAR scans")
-
-imu_data = [{"t": row[0], "gyro": row[1:4], "acc": row[4:7]} for row in imu_arr]
-lidar_data = list(lidar_arr)
-
-print("Running standard IEKF...")
-np.random.seed(123)
-hist_std = run_filter(imu_data, lidar_data, use_fej=False, use_s2s=False)
-
-print("Running standard IEKF + scan-to-scan CRLB drift...")
-np.random.seed(123)
-hist_s2s = run_filter(imu_data, lidar_data, use_fej=False, use_s2s=True)
-
-print("Running standard IEKF + scan-to-scan + degeneracy suppression...")
-np.random.seed(123)
-hist_full = run_filter(imu_data, lidar_data, use_fej=False, use_s2s=True,
-                       use_degen_suppression=True)
-
-
 def summarize(name, hist):
     err_norm = np.linalg.norm(hist["p_est"] - hist["p_true"], axis=1)
     mid = len(hist["t"]) // 2
@@ -924,11 +950,33 @@ def summarize(name, hist):
     print(f"  Yaw overconfidence ratio (published) = {yaw_overconfidence_inf:.2f}x")
 
 
-summarize("Standard IEKF", hist_std)
-summarize("Standard IEKF + scan-to-scan", hist_s2s)
-summarize("Standard IEKF + scan-to-scan + degen", hist_full)
+if __name__ == "__main__":
+    print("Loading simulated data...")
+    imu_arr = np.load(f"{OUT_DIR}/sim_imu.npy")
+    lidar_arr = np.load(f"{OUT_DIR}/sim_lidar.npy", allow_pickle=True)
+    print(f"  {len(imu_arr)} IMU samples, {len(lidar_arr)} LiDAR scans")
 
-plot_comparison(hist_std, hist_s2s, hist_full)
-plot_scan_to_scan(hist_s2s)
-print("\nNEES (Standard IEKF + scan-to-scan):")
-plot_nees(hist_s2s)
+    imu_data = [{"t": row[0], "gyro": row[1:4], "acc": row[4:7]} for row in imu_arr]
+    lidar_data = list(lidar_arr)
+
+    print("Running standard IEKF...")
+    np.random.seed(123)
+    hist_std = run_filter(imu_data, lidar_data, use_fej=False, use_s2s=False)
+
+    print("Running standard IEKF + scan-to-scan CRLB drift...")
+    np.random.seed(123)
+    hist_s2s = run_filter(imu_data, lidar_data, use_fej=False, use_s2s=True)
+
+    print("Running standard IEKF + scan-to-scan + degeneracy suppression...")
+    np.random.seed(123)
+    hist_full = run_filter(imu_data, lidar_data, use_fej=False, use_s2s=True,
+                           use_degen_suppression=True)
+
+    summarize("Standard IEKF", hist_std)
+    summarize("Standard IEKF + scan-to-scan", hist_s2s)
+    summarize("Standard IEKF + scan-to-scan + degen", hist_full)
+
+    plot_comparison(hist_std, hist_s2s, hist_full)
+    plot_scan_to_scan(hist_s2s)
+    print("\nNEES (Standard IEKF + scan-to-scan):")
+    plot_nees(hist_s2s)

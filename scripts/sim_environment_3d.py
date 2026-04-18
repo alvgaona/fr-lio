@@ -54,6 +54,11 @@ elif ENVIRONMENT == "room_corridor":
     ROOM_Y = 10.0
     ROOM_Z = 3.0
     SENSOR_POS = np.array([5.0, 5.0, 1.5])
+elif ENVIRONMENT == "square_corridor":
+    ROOM_X = 10.0
+    ROOM_Y = 10.0
+    ROOM_Z = 3.0
+    SENSOR_POS = np.array([5.0, 1.0, 1.5])
 else:
     # Default: cube room (also used by the "hover" environment since hover
     # only differs in the trajectory, not the geometry).
@@ -203,6 +208,35 @@ elif ENVIRONMENT == "room_corridor":
     ]
     for obs in OBSTACLES:
         PLANES.extend(make_box_planes(obs["center"], obs["size"]))
+elif ENVIRONMENT == "square_corridor":
+    OUTER = 10.0
+    INNER_LO = 2.0
+    INNER_HI = 8.0
+    Z_HALF = 1.5
+    INNER_HALF = (INNER_HI - INNER_LO) / 2
+    PLANES = [
+        (np.array([0.0, OUTER / 2, Z_HALF]), np.array([1.0, 0.0, 0.0]),
+         (-OUTER / 2, OUTER / 2, -Z_HALF, Z_HALF)),
+        (np.array([OUTER, OUTER / 2, Z_HALF]), np.array([-1.0, 0.0, 0.0]),
+         (-OUTER / 2, OUTER / 2, -Z_HALF, Z_HALF)),
+        (np.array([OUTER / 2, 0.0, Z_HALF]), np.array([0.0, 1.0, 0.0]),
+         (-OUTER / 2, OUTER / 2, -Z_HALF, Z_HALF)),
+        (np.array([OUTER / 2, OUTER, Z_HALF]), np.array([0.0, -1.0, 0.0]),
+         (-OUTER / 2, OUTER / 2, -Z_HALF, Z_HALF)),
+        (np.array([OUTER / 2, OUTER / 2, 0.0]), np.array([0.0, 0.0, 1.0]),
+         (-OUTER / 2, OUTER / 2, -OUTER / 2, OUTER / 2)),
+        (np.array([OUTER / 2, OUTER / 2, 2 * Z_HALF]), np.array([0.0, 0.0, -1.0]),
+         (-OUTER / 2, OUTER / 2, -OUTER / 2, OUTER / 2)),
+        (np.array([INNER_LO, OUTER / 2, Z_HALF]), np.array([-1.0, 0.0, 0.0]),
+         (-INNER_HALF, INNER_HALF, -Z_HALF, Z_HALF)),
+        (np.array([INNER_HI, OUTER / 2, Z_HALF]), np.array([1.0, 0.0, 0.0]),
+         (-INNER_HALF, INNER_HALF, -Z_HALF, Z_HALF)),
+        (np.array([OUTER / 2, INNER_LO, Z_HALF]), np.array([0.0, -1.0, 0.0]),
+         (-INNER_HALF, INNER_HALF, -Z_HALF, Z_HALF)),
+        (np.array([OUTER / 2, INNER_HI, Z_HALF]), np.array([0.0, 1.0, 0.0]),
+         (-INNER_HALF, INNER_HALF, -Z_HALF, Z_HALF)),
+    ]
+    OBSTACLES = []
 else:
     PLANES = make_room_planes(ROOM_X, ROOM_Y, ROOM_Z)
 
@@ -368,19 +402,20 @@ def plot_topdown(points, title, output_path):
     print(f"Saved {output_path}")
 
 
-single = simulate_scan(SENSOR_POS, SENSOR_ROT, scan_index=0, n_rays=N_RAYS_PER_SCAN)
-print(f"Single scan: {len(single)} points")
-plot_3d(single, "Single non-repetitive scan (3D)", f"{OUT_DIR}/sim3d_single_3d.png")
-plot_topdown(single, "Single non-repetitive scan (top-down)", f"{OUT_DIR}/sim3d_single_topdown.png")
+if __name__ == "__main__":
+    single = simulate_scan(SENSOR_POS, SENSOR_ROT, scan_index=0, n_rays=N_RAYS_PER_SCAN)
+    print(f"Single scan: {len(single)} points")
+    plot_3d(single, "Single non-repetitive scan (3D)", f"{OUT_DIR}/sim3d_single_3d.png")
+    plot_topdown(single, "Single non-repetitive scan (top-down)", f"{OUT_DIR}/sim3d_single_topdown.png")
 
-accumulated = []
-for i in range(N_SCANS_TO_ACCUMULATE):
-    scan = simulate_scan(SENSOR_POS, SENSOR_ROT, scan_index=i, n_rays=N_RAYS_PER_SCAN)
-    if len(scan) > 0:
-        accumulated.append(scan)
-accumulated = np.vstack(accumulated)
-print(f"Accumulated ({N_SCANS_TO_ACCUMULATE} scans): {len(accumulated)} points")
-plot_3d(accumulated, f"Accumulated scans ({N_SCANS_TO_ACCUMULATE} frames)",
-        f"{OUT_DIR}/sim3d_accumulated_3d.png")
-plot_topdown(accumulated, f"Accumulated scans ({N_SCANS_TO_ACCUMULATE} frames)",
-             f"{OUT_DIR}/sim3d_accumulated_topdown.png")
+    accumulated = []
+    for i in range(N_SCANS_TO_ACCUMULATE):
+        scan = simulate_scan(SENSOR_POS, SENSOR_ROT, scan_index=i, n_rays=N_RAYS_PER_SCAN)
+        if len(scan) > 0:
+            accumulated.append(scan)
+    accumulated = np.vstack(accumulated)
+    print(f"Accumulated ({N_SCANS_TO_ACCUMULATE} scans): {len(accumulated)} points")
+    plot_3d(accumulated, f"Accumulated scans ({N_SCANS_TO_ACCUMULATE} frames)",
+            f"{OUT_DIR}/sim3d_accumulated_3d.png")
+    plot_topdown(accumulated, f"Accumulated scans ({N_SCANS_TO_ACCUMULATE} frames)",
+                 f"{OUT_DIR}/sim3d_accumulated_topdown.png")
