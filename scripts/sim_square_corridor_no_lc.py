@@ -23,7 +23,7 @@ from sim_imu_trajectory import (
 )
 from collections import deque
 from sim_iekf_3d import (
-    State, predict, iekf_update, OnlineMap,
+    State, predict, iekf_update, OnlineMap, GlobalMap,
     DT_IMU, NN_K, MAP_VOXEL_SIZE, rodrigues_log,
     compute_scan_to_scan_covariance,
     S2S_MIN_TRANS_M, S2S_MIN_ROT_RAD, S2S_MIN_VALID_POINTS,
@@ -57,7 +57,12 @@ CUBE_LEN = float(os.environ.get("SIM_CUBE_LEN", "4.0"))
 CUBE_REPRUNE_TRIGGER = 0.4 * CUBE_LEN
 
 
-def prune_to_cube(omap, center, half_len):
+def prune_to_cube(omap, center, half_len, global_map=None):
+    """Box-prune working map. If global_map is provided, transfer evicted
+    points (with their source-pose tags) into it before deletion — mimics the
+    shadow-tree architecture that lets a small working map coexist with a
+    persistent global map suitable for post-LC correction.
+    """
     if len(omap.points) == 0:
         return
     pts = np.array(omap.points)
@@ -65,6 +70,10 @@ def prune_to_cube(omap, center, half_len):
     if mask.all():
         return
     src = omap.source_idx
+    if global_map is not None:
+        evicted_pts = [pts[i] for i in range(len(src)) if not mask[i]]
+        evicted_src = [src[i] for i in range(len(src)) if not mask[i]]
+        global_map.absorb(evicted_pts, evicted_src)
     omap.points = [p for p in pts[mask]]
     omap.source_idx = [src[i] for i in range(len(src)) if mask[i]]
     omap.voxel_set = set(
@@ -73,7 +82,8 @@ def prune_to_cube(omap, center, half_len):
     omap._dirty = True
 
 
-def run_ieskf_no_lc(imu_data, lidar_data, use_perpoint_cov=None):
+def run_ieskf_no_lc(imu_data, lidar_data, use_perpoint_cov=None,
+                     enable_global_map=False):
     if use_perpoint_cov is None:
         use_perpoint_cov = USE_PERPOINT_COV
     R0, p0, v0, _, _ = trajectory_at(0.0)
@@ -81,6 +91,7 @@ def run_ieskf_no_lc(imu_data, lidar_data, use_perpoint_cov=None):
                   INITIAL_GYR_BIAS.copy(), INITIAL_ACC_BIAS.copy())
     P = np.diag([0.02]*3 + [0.05]*3 + [0.05]*3 + [0.001]*3 + [0.005]*3) ** 2
     omap = OnlineMap()
+    global_map = GlobalMap() if enable_global_map else None
     cube_center = state.p.copy()
     map_size_history = []
 
@@ -196,7 +207,8 @@ def run_ieskf_no_lc(imu_data, lidar_data, use_perpoint_cov=None):
 
                 if np.max(np.abs(state.p - cube_center)) > CUBE_REPRUNE_TRIGGER:
                     cube_center = state.p.copy()
-                    prune_to_cube(omap, cube_center, CUBE_LEN / 2.0)
+                    prune_to_cube(omap, cube_center, CUBE_LEN / 2.0,
+                                   global_map=global_map)
 
                 Adj_curT = np.zeros((6, 6))
                 Adj_curT[0:3, 0:3] = state.R.T
@@ -225,7 +237,7 @@ def run_ieskf_no_lc(imu_data, lidar_data, use_perpoint_cov=None):
     return (est_poses, est_times, gt_poses,
             cov_pos, cov_rot, cov_pos_inflated, cov_rot_inflated,
             np.array(imu_est_p), np.array(imu_t), np.array(map_size_history),
-            edge_covs, omap)
+            edge_covs, omap, global_map)
 
 
 def compute_nees(est_poses, gt_poses, cov_pos, cov_rot):
@@ -281,7 +293,7 @@ if __name__ == "__main__":
     np.random.seed(123)
     (est_poses, est_times, gt_poses, cov_pos, cov_rot,
      cov_pos_inf, cov_rot_inf,
-     imu_p, imu_t, map_sizes, _edge_covs, _omap) = run_ieskf_no_lc(imu_data, lidar_data)
+     imu_p, imu_t, map_sizes, _edge_covs, _omap, _gmap) = run_ieskf_no_lc(imu_data, lidar_data)
     print(f"  {len(est_poses)} keyframe poses, "
           f"map size: max={map_sizes.max()}, final={map_sizes[-1]}")
 

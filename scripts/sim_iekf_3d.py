@@ -265,6 +265,67 @@ class OnlineMap:
         return len(self.points)
 
 
+class GlobalMap:
+    """Shadow / global map that absorbs points evicted from the working map.
+
+    Mirrors FAST-LIO's missing piece: the working ikd-Tree is sliding-cube
+    pruned for bounded memory; this structure persists those evicted points so
+    the full traversed environment is preserved and can be LC-corrected.
+
+    Voxel-deduplicated by the same MAP_VOXEL_SIZE so memory grows only with
+    spatial coverage, not with revisitation.
+
+    Production C++ analog: a separate ikd-Tree (or similar) that receives
+    points box-deleted from the working tree, never queried by the filter,
+    corrected post-LC via per-source-pose Δ.
+    """
+    def __init__(self):
+        self.points = []
+        self.source_idx = []
+        self.voxel_set = set()
+
+    def absorb(self, evicted_points, evicted_source_idx):
+        for p, s in zip(evicted_points, evicted_source_idx):
+            arr = np.asarray(p)
+            key = tuple(np.round(arr / MAP_VOXEL_SIZE).astype(int))
+            if key not in self.voxel_set:
+                self.voxel_set.add(key)
+                self.points.append(arr.copy())
+                self.source_idx.append(s)
+
+    def correct_map(self, original_poses, corrected_poses):
+        """Same per-source-pose Δ transform as OnlineMap.correct_map.
+        Rebuilds voxel_set after correction so dedup remains consistent.
+        """
+        if not self.points or not original_poses or not corrected_poses:
+            return 0
+        n_poses = len(original_poses)
+        n_corrected = 0
+        new_points = []
+        new_source = []
+        for p, idx in zip(self.points, self.source_idx):
+            if idx < 0 or idx >= n_poses:
+                new_points.append(p.copy())
+                new_source.append(idx)
+                continue
+            R_o, t_o = original_poses[idx]
+            R_c, t_c = corrected_poses[idx]
+            p_body = R_o.T @ (p - t_o)
+            p_new = R_c @ p_body + t_c
+            new_points.append(p_new)
+            new_source.append(idx)
+            n_corrected += 1
+        self.points = new_points
+        self.source_idx = new_source
+        self.voxel_set = set(
+            tuple(np.round(p / MAP_VOXEL_SIZE).astype(int)) for p in self.points
+        )
+        return n_corrected
+
+    def __len__(self):
+        return len(self.points)
+
+
 def fit_plane(neighbors):
     """Fit a plane to a set of 3D points.
 

@@ -148,7 +148,7 @@ if __name__ == "__main__":
     print(f"\nRunning IESKF once (cube_len={CUBE_LEN:.1f} m)...")
     np.random.seed(123)
     (est_poses, est_times, gt_poses, _, _, _, _,
-     _, _, _, edge_covs_per_step, _) = run_ieskf_no_lc(imu_data, lidar_data,
+     _, _, _, edge_covs_per_step, _, _, _) = run_ieskf_no_lc(imu_data, lidar_data,
                                                       use_perpoint_cov=False)
     n = len(est_poses)
     print(f"  {n} keyframe poses, "
@@ -157,7 +157,7 @@ if __name__ == "__main__":
     print(f"\nRunning IESKF with per-point covariance (for Config I)...")
     np.random.seed(123)
     (est_poses_pp, est_times_pp, gt_poses_pp, _, _, _, _,
-     _, _, _, edge_covs_pp, _) = run_ieskf_no_lc(imu_data, lidar_data,
+     _, _, _, edge_covs_pp, _, _, _) = run_ieskf_no_lc(imu_data, lidar_data,
                                                 use_perpoint_cov=True)
     print(f"  {len(est_poses_pp)} keyframe poses (per-point)")
 

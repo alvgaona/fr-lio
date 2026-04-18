@@ -76,25 +76,38 @@ imu_data = [{"t": r[0], "gyro": r[1:4], "acc": r[4:7]} for r in imu_arr]
 lidar_data = list(lidar_arr)
 print(f"  {len(imu_arr)} IMU samples, {len(lidar_arr)} LiDAR scans")
 
-print(f"\nRunning IESKF (cube_len={CUBE_LEN:.1f} m, per-point Σ on)...")
+print(f"\nRunning IESKF (cube_len={CUBE_LEN:.1f} m, per-point Σ on, global map enabled)...")
 np.random.seed(123)
 (est_poses, est_times, gt_poses, _, _, _, _,
- _, _, _, edge_covs, omap) = run_ieskf_no_lc(
-    imu_data, lidar_data, use_perpoint_cov=True)
+ _, _, _, edge_covs, omap, gmap) = run_ieskf_no_lc(
+    imu_data, lidar_data, use_perpoint_cov=True, enable_global_map=True)
 n = len(est_poses)
-print(f"  {n} keyframes; map has {len(omap)} points")
-print(f"  source_idx range: [{min(omap.source_idx)}, {max(omap.source_idx)}]")
+print(f"  {n} keyframes")
+print(f"  Working map (ikd-Tree analog): {len(omap)} points (cube-pruned)")
+print(f"  Global map (shadow tree):      {len(gmap)} points (LC-correctable)")
+if omap.source_idx:
+    print(f"    working src_idx range: [{min(omap.source_idx)}, {max(omap.source_idx)}]")
+if gmap.source_idx:
+    print(f"    global  src_idx range: [{min(gmap.source_idx)}, {max(gmap.source_idx)}]")
 
 ate_no_lc = compute_ate(est_poses, gt_poses)
 print(f"  No-LC ATE RMSE: {np.sqrt(np.mean(ate_no_lc**2)):.4f} m")
 
-# Snapshot original map points BEFORE correction so we can compare
-original_map_points = [p.copy() for p in omap.points]
-original_dists = map_to_gt_distance(original_map_points)
+# Snapshot original points (working AND global) BEFORE correction
+original_working_points = [p.copy() for p in omap.points]
+original_global_points = [p.copy() for p in gmap.points]
+original_working_dists = map_to_gt_distance(original_working_points)
+original_global_dists = map_to_gt_distance(original_global_points)
+
 print(f"\nMap-to-GT-walls distance BEFORE correction:")
-print(f"  mean={original_dists.mean()*1000:.1f} mm  "
-      f"median={np.median(original_dists)*1000:.1f} mm  "
-      f"p95={np.percentile(original_dists, 95)*1000:.1f} mm")
+print(f"  Working map: mean={original_working_dists.mean()*1000:.1f} mm  "
+      f"median={np.median(original_working_dists)*1000:.1f} mm  "
+      f"p95={np.percentile(original_working_dists, 95)*1000:.1f} mm  "
+      f"(N={len(original_working_points)})")
+print(f"  Global  map: mean={original_global_dists.mean()*1000:.1f} mm  "
+      f"median={np.median(original_global_dists)*1000:.1f} mm  "
+      f"p95={np.percentile(original_global_dists, 95)*1000:.1f} mm  "
+      f"(N={len(original_global_points)})")
 
 print(f"\nDetecting loop closures...")
 closures = detect_loop_closures(gt_poses, est_times,
@@ -123,84 +136,98 @@ corrected_poses = pose_graph_optimize(est_poses, odom_edges, lc_factors)
 ate_lc = compute_ate(corrected_poses, gt_poses)
 print(f"  Corrected ATE RMSE: {np.sqrt(np.mean(ate_lc**2)):.4f} m")
 
-print("\nApplying map correction (per-source-pose Δ transform)...")
-n_corrected = omap.correct_map(est_poses, corrected_poses)
-print(f"  {n_corrected} / {len(omap)} points corrected")
+print("\nApplying map correction (per-source-pose Δ transform) to BOTH maps...")
+n_corr_working = omap.correct_map(est_poses, corrected_poses)
+n_corr_global = gmap.correct_map(est_poses, corrected_poses)
+print(f"  Working map: {n_corr_working} / {len(omap)} points corrected")
+print(f"  Global  map: {n_corr_global} / {len(gmap)} points corrected")
 
-corrected_dists = map_to_gt_distance(omap.points)
+corrected_working_dists = map_to_gt_distance(omap.points)
+corrected_global_dists = map_to_gt_distance(gmap.points)
+
 print(f"\nMap-to-GT-walls distance AFTER correction:")
-print(f"  mean={corrected_dists.mean()*1000:.1f} mm  "
-      f"median={np.median(corrected_dists)*1000:.1f} mm  "
-      f"p95={np.percentile(corrected_dists, 95)*1000:.1f} mm")
+print(f"  Working map: mean={corrected_working_dists.mean()*1000:.1f} mm  "
+      f"median={np.median(corrected_working_dists)*1000:.1f} mm  "
+      f"p95={np.percentile(corrected_working_dists, 95)*1000:.1f} mm")
+print(f"  Global  map: mean={corrected_global_dists.mean()*1000:.1f} mm  "
+      f"median={np.median(corrected_global_dists)*1000:.1f} mm  "
+      f"p95={np.percentile(corrected_global_dists, 95)*1000:.1f} mm")
 
-improvement = ((original_dists.mean() - corrected_dists.mean()) /
-               original_dists.mean() * 100)
-print(f"\nMap quality improvement (mean dist): {improvement:+.1f}%")
+imp_working = ((original_working_dists.mean() - corrected_working_dists.mean()) /
+               max(original_working_dists.mean(), 1e-9) * 100)
+imp_global = ((original_global_dists.mean() - corrected_global_dists.mean()) /
+              max(original_global_dists.mean(), 1e-9) * 100)
+print(f"\nMap quality improvement:")
+print(f"  Working map (mean dist): {imp_working:+.1f}%")
+print(f"  Global  map (mean dist): {imp_global:+.1f}%")
 
 print("\nSaving plot...")
 gt_p = np.array([p for _, p in gt_poses])
 est_p = np.array([p for _, p in est_poses])
 opt_p = np.array([p for _, p in corrected_poses])
-orig_pts = np.asarray(original_map_points)
-corr_pts = np.asarray(omap.points)
+orig_global = np.asarray(original_global_points)
+corr_global = np.asarray(gmap.points)
 
 fig, axes = plt.subplots(2, 3, figsize=(18, 10))
 
 ax = axes[0, 0]
-ax.scatter(orig_pts[:, 0], orig_pts[:, 1], s=0.3, alpha=0.4, c="r",
-           label="map (drifted, pre-LC)")
+ax.scatter(orig_global[:, 0], orig_global[:, 1], s=0.3, alpha=0.45, c="r",
+           label=f"global map (drifted, N={len(orig_global)})")
 ax.plot(gt_p[:, 0], gt_p[:, 1], "k-", lw=1.5, label="GT trajectory")
 ax.plot(est_p[:, 0], est_p[:, 1], "r-", lw=1.0, alpha=0.8, label="IESKF estimate")
 ax.set_xlabel("x (m)"); ax.set_ylabel("y (m)")
-ax.set_title("Map BEFORE LC correction")
+ax.set_title("Global map BEFORE LC correction")
 ax.set_aspect("equal"); ax.legend(fontsize=8); ax.grid(True, alpha=0.3)
 
 ax = axes[0, 1]
-ax.scatter(corr_pts[:, 0], corr_pts[:, 1], s=0.3, alpha=0.4, c="b",
-           label="map (corrected)")
+ax.scatter(corr_global[:, 0], corr_global[:, 1], s=0.3, alpha=0.45, c="b",
+           label=f"global map (corrected, N={len(corr_global)})")
 ax.plot(gt_p[:, 0], gt_p[:, 1], "k-", lw=1.5, label="GT trajectory")
 ax.plot(opt_p[:, 0], opt_p[:, 1], "b-", lw=1.0, alpha=0.8, label="LC-optimized")
 ax.set_xlabel("x (m)"); ax.set_ylabel("y (m)")
-ax.set_title("Map AFTER LC correction")
+ax.set_title("Global map AFTER LC correction")
 ax.set_aspect("equal"); ax.legend(fontsize=8); ax.grid(True, alpha=0.3)
 
 ax = axes[0, 2]
-bins = np.linspace(0, max(np.percentile(original_dists, 99),
-                          np.percentile(corrected_dists, 99)), 60)
-ax.hist(original_dists * 1000, bins=bins * 1000, alpha=0.55, color="r",
-        edgecolor="black", label=f"before  mean={original_dists.mean()*1000:.0f}mm")
-ax.hist(corrected_dists * 1000, bins=bins * 1000, alpha=0.55, color="b",
-        edgecolor="black", label=f"after  mean={corrected_dists.mean()*1000:.0f}mm")
+upper = max(np.percentile(original_global_dists, 99),
+            np.percentile(corrected_global_dists, 99))
+bins = np.linspace(0, upper, 60)
+ax.hist(original_global_dists * 1000, bins=bins * 1000, alpha=0.55, color="r",
+        edgecolor="black",
+        label=f"global before  mean={original_global_dists.mean()*1000:.0f}mm")
+ax.hist(corrected_global_dists * 1000, bins=bins * 1000, alpha=0.55, color="b",
+        edgecolor="black",
+        label=f"global after  mean={corrected_global_dists.mean()*1000:.0f}mm")
 ax.set_xlabel("Distance to nearest GT wall (mm)")
 ax.set_ylabel("# map points")
-ax.set_title("Map-to-GT-walls distance distribution")
+ax.set_title("Global map distance to GT walls")
 ax.legend(fontsize=9); ax.grid(True, alpha=0.3)
 
-# Overlay: source-pose-colored map (pre-correction) — visualizes how points
-# from different keyframes ended up at different drifted positions.
 ax = axes[1, 0]
-src = np.asarray(omap.source_idx)
-sc = ax.scatter(orig_pts[:, 0], orig_pts[:, 1], s=0.5,
+src = np.asarray(gmap.source_idx)
+sc = ax.scatter(orig_global[:, 0], orig_global[:, 1], s=0.5,
                 c=src, cmap="viridis", alpha=0.6)
 ax.plot(gt_p[:, 0], gt_p[:, 1], "k-", lw=0.7, alpha=0.5)
 plt.colorbar(sc, ax=ax, label="source keyframe index")
 ax.set_xlabel("x (m)"); ax.set_ylabel("y (m)")
-ax.set_title("Map points colored by source keyframe (pre-correction)")
+ax.set_title("Global map by source keyframe (pre-correction)")
 ax.set_aspect("equal"); ax.grid(True, alpha=0.3)
 
 ax = axes[1, 1]
-sc = ax.scatter(corr_pts[:, 0], corr_pts[:, 1], s=0.5,
+sc = ax.scatter(corr_global[:, 0], corr_global[:, 1], s=0.5,
                 c=src, cmap="viridis", alpha=0.6)
 ax.plot(gt_p[:, 0], gt_p[:, 1], "k-", lw=0.7, alpha=0.5)
 plt.colorbar(sc, ax=ax, label="source keyframe index")
 ax.set_xlabel("x (m)"); ax.set_ylabel("y (m)")
-ax.set_title("Map points colored by source keyframe (post-correction)")
+ax.set_title("Global map by source keyframe (post-correction)")
 ax.set_aspect("equal"); ax.grid(True, alpha=0.3)
 
 ax = axes[1, 2]
 t_arr = np.array(est_times)
-ax.plot(t_arr, ate_no_lc, "r-", lw=1.0, label=f"no LC  RMSE={np.sqrt(np.mean(ate_no_lc**2)):.3f}m")
-ax.plot(t_arr, ate_lc, "b-", lw=1.0, label=f"LC opt  RMSE={np.sqrt(np.mean(ate_lc**2)):.3f}m")
+ax.plot(t_arr, ate_no_lc, "r-", lw=1.0,
+        label=f"no LC  RMSE={np.sqrt(np.mean(ate_no_lc**2)):.3f}m")
+ax.plot(t_arr, ate_lc, "b-", lw=1.0,
+        label=f"LC opt  RMSE={np.sqrt(np.mean(ate_lc**2)):.3f}m")
 for (_, j, _) in closures:
     ax.axvline(est_times[j], color="g", ls=":", lw=0.5, alpha=0.4)
 ax.set_xlabel("t (s)"); ax.set_ylabel("position error (m)")
