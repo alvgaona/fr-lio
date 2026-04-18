@@ -193,25 +193,73 @@ class OnlineMap:
 
     Built from previous scans transformed using the EKF state estimate. The
     map drifts with the state estimate, just like FAST-LIO2's ikd-Tree.
+
+    Optional source-pose tagging (source_idx) is the foundation for post-LC
+    map correction: each map point remembers which keyframe inserted it, so
+    after pose graph optimization corrects keyframe k by Δ_k, all points with
+    source_idx == k can be transformed by Δ_k to bring the map into the
+    corrected frame.
     """
     def __init__(self):
         self.points = []
         self.voxel_set = set()
+        self.source_idx = []  # per-point keyframe index of insertion
         self.tree = None
         self._dirty = False
 
-    def add_points(self, world_points):
+    def add_points(self, world_points, source_idx=-1):
         for p in world_points:
             key = tuple(np.round(p / MAP_VOXEL_SIZE).astype(int))
             if key not in self.voxel_set:
                 self.voxel_set.add(key)
                 self.points.append(p.copy())
+                self.source_idx.append(source_idx)
         self._dirty = True
 
     def build_tree(self):
         if self._dirty and len(self.points) > 0:
             self.tree = cKDTree(np.array(self.points))
             self._dirty = False
+
+    def correct_map(self, original_poses, corrected_poses):
+        """Transform each map point by Δ_k of its source keyframe k.
+
+        For point p inserted at original pose (R_o, t_o), corrected to (R_c, t_c):
+            p_body = R_o^T (p_world - t_o)
+            p_world_new = R_c p_body + t_c
+        Equivalently:
+            p_world_new = R_c R_o^T p_world + (t_c - R_c R_o^T t_o)
+
+        Skips points whose source_idx < 0 (untagged) or out of pose range.
+        Rebuilds voxel_set + cKDTree from the corrected points.
+        """
+        if not self.points or not original_poses or not corrected_poses:
+            return 0
+        n_poses = len(original_poses)
+        n_corrected = 0
+        new_points = []
+        new_source = []
+        for p, idx in zip(self.points, self.source_idx):
+            if idx < 0 or idx >= n_poses:
+                new_points.append(p.copy())
+                new_source.append(idx)
+                continue
+            R_o, t_o = original_poses[idx]
+            R_c, t_c = corrected_poses[idx]
+            p_body = R_o.T @ (p - t_o)
+            p_new = R_c @ p_body + t_c
+            new_points.append(p_new)
+            new_source.append(idx)
+            n_corrected += 1
+        # Rebuild voxel_set; later insertions for the same voxel will be
+        # deduplicated against the corrected positions.
+        self.points = new_points
+        self.source_idx = new_source
+        self.voxel_set = set(
+            tuple(np.round(p / MAP_VOXEL_SIZE).astype(int)) for p in self.points
+        )
+        self._dirty = True
+        return n_corrected
 
     def __len__(self):
         return len(self.points)

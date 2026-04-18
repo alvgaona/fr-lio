@@ -36,6 +36,12 @@ USE_PERSIST = os.environ.get("SIM_PERSIST", "1") == "1"
 BIAS_WALK_POS = float(os.environ.get("SIM_BIAS_WALK_POS", "0.0"))
 BIAS_WALK_ROT = float(os.environ.get("SIM_BIAS_WALK_ROT", "0.0"))
 USE_PERPOINT_COV = os.environ.get("SIM_PERPOINT_COV", "0") == "1"
+# Option 1 (Schmidt-Kalman style): use filter's own P[bg], P[ba] to derive a
+# per-edge cov floor. Captures bias-state uncertainty propagation into pose
+# space without empirical tuning. Per-edge variance:
+#   floor_pos_axis = sigma_ba_axis^2 * dt^2
+#   floor_rot_axis = sigma_bg_axis^2 * dt^2
+USE_FILTER_BIAS_FLOOR = os.environ.get("SIM_FILTER_BIAS_FLOOR", "0") == "1"
 
 OUT_DIR = os.environ.get(
     "SIM_OUT_DIR",
@@ -58,7 +64,9 @@ def prune_to_cube(omap, center, half_len):
     mask = np.all(np.abs(pts - center) <= half_len, axis=1)
     if mask.all():
         return
+    src = omap.source_idx
     omap.points = [p for p in pts[mask]]
+    omap.source_idx = [src[i] for i in range(len(src)) if mask[i]]
     omap.voxel_set = set(
         tuple(np.round(p / MAP_VOXEL_SIZE).astype(int)) for p in omap.points
     )
@@ -157,10 +165,22 @@ def run_ieskf_no_lc(imu_data, lidar_data, use_perpoint_cov=None):
 
                 dt_step = scan["t"] - last_t
                 bias_step = np.zeros((6, 6))
-                if dt_step > 0 and (BIAS_WALK_POS > 0 or BIAS_WALK_ROT > 0):
-                    bias_step[0:3, 0:3] = np.eye(3) * BIAS_WALK_POS * dt_step
-                    bias_step[3:6, 3:6] = np.eye(3) * BIAS_WALK_ROT * dt_step
-                    P_drift += bias_step
+                if dt_step > 0:
+                    if BIAS_WALK_POS > 0 or BIAS_WALK_ROT > 0:
+                        bias_step[0:3, 0:3] += np.eye(3) * BIAS_WALK_POS * dt_step
+                        bias_step[3:6, 3:6] += np.eye(3) * BIAS_WALK_ROT * dt_step
+                    if USE_FILTER_BIAS_FLOOR:
+                        # Filter state layout: [rot(0:3), pos(3:6), vel(6:9),
+                        # bg(9:12), ba(12:15)]. Project bias-state uncertainty
+                        # into pose space per edge:
+                        #   sigma_pos_axis^2 = sigma_ba_axis^2 * dt^2
+                        #   sigma_rot_axis^2 = sigma_bg_axis^2 * dt^2
+                        sigma_ba2 = np.diag(P[12:15, 12:15])
+                        sigma_bg2 = np.diag(P[9:12, 9:12])
+                        bias_step[0:3, 0:3] += np.diag(sigma_ba2 * dt_step ** 2)
+                        bias_step[3:6, 3:6] += np.diag(sigma_bg2 * dt_step ** 2)
+                    if np.any(bias_step):
+                        P_drift += bias_step
                 if pending_edge_cov is not None:
                     edge_covs.append(pending_edge_cov + bias_step)
                 else:
@@ -168,7 +188,11 @@ def run_ieskf_no_lc(imu_data, lidar_data, use_perpoint_cov=None):
                 last_t = scan["t"]
 
                 wp = (state.R @ scan["points_body"].T).T + state.p
-                omap.add_points(wp)
+                # Source-pose index = current keyframe index (= len(est_poses)
+                # before the append below). This tags every map point with the
+                # keyframe whose pose was used at insertion time, enabling
+                # post-LC map correction via `omap.correct_map(...)`.
+                omap.add_points(wp, source_idx=len(est_poses))
 
                 if np.max(np.abs(state.p - cube_center)) > CUBE_REPRUNE_TRIGGER:
                     cube_center = state.p.copy()
@@ -201,7 +225,7 @@ def run_ieskf_no_lc(imu_data, lidar_data, use_perpoint_cov=None):
     return (est_poses, est_times, gt_poses,
             cov_pos, cov_rot, cov_pos_inflated, cov_rot_inflated,
             np.array(imu_est_p), np.array(imu_t), np.array(map_size_history),
-            edge_covs)
+            edge_covs, omap)
 
 
 def compute_nees(est_poses, gt_poses, cov_pos, cov_rot):
@@ -257,7 +281,7 @@ if __name__ == "__main__":
     np.random.seed(123)
     (est_poses, est_times, gt_poses, cov_pos, cov_rot,
      cov_pos_inf, cov_rot_inf,
-     imu_p, imu_t, map_sizes, _edge_covs) = run_ieskf_no_lc(imu_data, lidar_data)
+     imu_p, imu_t, map_sizes, _edge_covs, _omap) = run_ieskf_no_lc(imu_data, lidar_data)
     print(f"  {len(est_poses)} keyframe poses, "
           f"map size: max={map_sizes.max()}, final={map_sizes[-1]}")
 

@@ -95,7 +95,7 @@ print(f"  {len(imu_arr)} IMU samples, {len(lidar_arr)} LiDAR scans")
 
 print(f"\n[1/2] IESKF baseline (LIDAR_POINT_VAR={LIDAR_POINT_VAR})...")
 np.random.seed(123)
-(est_b, t_b, gt_b, _, _, _, _, _, _, _, _) = run_ieskf_no_lc(imu_data, lidar_data,
+(est_b, t_b, gt_b, _, _, _, _, _, _, _, _, _) = run_ieskf_no_lc(imu_data, lidar_data,
                                                               use_perpoint_cov=False)
 err_b = position_error(est_b, gt_b)
 print(f"  RMSE ATE = {rmse(err_b):.4f} m  mean = {err_b.mean():.4f} m  "
@@ -103,7 +103,7 @@ print(f"  RMSE ATE = {rmse(err_b):.4f} m  mean = {err_b.mean():.4f} m  "
 
 print(f"\n[2/2] IESKF with per-point Σ (sigma_range={SIGMA_RANGE_PERPOINT})...")
 np.random.seed(123)
-(est_p, t_p, gt_p, _, _, _, _, _, _, _, _) = run_ieskf_no_lc(imu_data, lidar_data,
+(est_p, t_p, gt_p, _, _, _, _, _, _, _, _, _) = run_ieskf_no_lc(imu_data, lidar_data,
                                                               use_perpoint_cov=True)
 err_p = position_error(est_p, gt_p)
 print(f"  RMSE ATE = {rmse(err_p):.4f} m  mean = {err_p.mean():.4f} m  "

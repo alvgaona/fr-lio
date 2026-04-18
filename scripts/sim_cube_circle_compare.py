@@ -61,7 +61,7 @@ print(f"  {len(imu_arr)} IMU samples, {len(lidar_arr)} LiDAR scans, "
 print(f"\nRunning IESKF once (cube_len={CUBE_LEN:.1f} m)...")
 np.random.seed(123)
 (est_poses, est_times, gt_poses, _, _, _, _,
- _, _, _, edge_covs_per_step) = run_ieskf_no_lc(imu_data, lidar_data,
+ _, _, _, edge_covs_per_step, _) = run_ieskf_no_lc(imu_data, lidar_data,
                                                   use_perpoint_cov=False)
 n = len(est_poses)
 n_valid = sum(1 for c in edge_covs_per_step if c is not None)
@@ -70,7 +70,7 @@ print(f"  {n} keyframe poses, {n_valid} valid CRLB edges")
 print(f"\nRunning IESKF with per-point covariance (for Config I)...")
 np.random.seed(123)
 (est_poses_pp, est_times_pp, gt_poses_pp, _, _, _, _,
- _, _, _, edge_covs_pp) = run_ieskf_no_lc(imu_data, lidar_data,
+ _, _, _, edge_covs_pp, _) = run_ieskf_no_lc(imu_data, lidar_data,
                                             use_perpoint_cov=True)
 print(f"  {len(est_poses_pp)} keyframe poses (per-point)")
 
