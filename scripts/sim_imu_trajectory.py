@@ -29,7 +29,25 @@ OUT_DIR = os.environ.get(
 os.makedirs(OUT_DIR, exist_ok=True)
 np.random.seed(7)
 
-DURATION = 50.0 if ENVIRONMENT == "long_corridor" else 20.0
+SQ_HALF = 4.0
+SQ_CORNER_R = 0.5
+SQ_CENTER = np.array([5.0, 5.0, 1.5])
+SQ_SPEED = 1.0
+SQ_N_LAPS = 3
+SQ_STRAIGHT_LEN = 2.0 * (SQ_HALF - SQ_CORNER_R)
+SQ_ARC_LEN = 0.5 * np.pi * SQ_CORNER_R
+SQ_PERIM = 4.0 * SQ_STRAIGHT_LEN + 4.0 * SQ_ARC_LEN
+
+if ENVIRONMENT == "long_corridor":
+    DURATION = 50.0
+elif ENVIRONMENT == "square_corridor":
+    DURATION = SQ_PERIM * SQ_N_LAPS / SQ_SPEED
+elif ENVIRONMENT == "room_corridor":
+    DURATION = 60.0
+elif ENVIRONMENT == "cube":
+    DURATION = 60.0
+else:
+    DURATION = 20.0
 IMU_RATE = 200.0
 LIDAR_RATE = 10.0
 # Real Livox Mid-360 accumulated scan has ~20000 raw points at 10Hz.
@@ -211,6 +229,99 @@ def trajectory_at(t):
         ])
         R = np.eye(3)
         omega_world = np.zeros(3)
+        return R, p, v, omega_world, a_world
+
+    if ENVIRONMENT == "square_corridor":
+        L = SQ_HALF
+        r = SQ_CORNER_R
+        speed = SQ_SPEED
+        cx_, cy_, cz_ = SQ_CENTER
+        seg_len = [SQ_STRAIGHT_LEN, SQ_ARC_LEN] * 4
+        seg_start = [0.0]
+        for sl in seg_len[:-1]:
+            seg_start.append(seg_start[-1] + sl)
+        # Start at the middle of the bottom corridor (x=cx, y=cy-L) heading +x.
+        s_offset = 0.5 * SQ_STRAIGHT_LEN
+        s = (t * speed + s_offset) % SQ_PERIM
+        seg = 0
+        for i in range(8):
+            if s < seg_start[i] + seg_len[i] - 1e-12:
+                seg = i
+                break
+            seg = i
+        s_loc = s - seg_start[seg]
+
+        z_amp = 0.15
+        z_freq = 2 * np.pi / 5.0
+        z = cz_ + z_amp * np.sin(z_freq * t)
+        vz = z_amp * z_freq * np.cos(z_freq * t)
+        az = -z_amp * z_freq * z_freq * np.sin(z_freq * t)
+
+        if seg == 0:
+            x = cx_ - L + r + s_loc
+            y = cy_ - L
+            yaw = 0.0
+            vx, vy = speed, 0.0
+            ax, ay = 0.0, 0.0
+            wz = 0.0
+        elif seg == 2:
+            x = cx_ + L
+            y = cy_ - L + r + s_loc
+            yaw = 0.5 * np.pi
+            vx, vy = 0.0, speed
+            ax, ay = 0.0, 0.0
+            wz = 0.0
+        elif seg == 4:
+            x = cx_ + L - r - s_loc
+            y = cy_ + L
+            yaw = np.pi
+            vx, vy = -speed, 0.0
+            ax, ay = 0.0, 0.0
+            wz = 0.0
+        elif seg == 6:
+            x = cx_ - L
+            y = cy_ + L - r - s_loc
+            yaw = -0.5 * np.pi
+            vx, vy = 0.0, -speed
+            ax, ay = 0.0, 0.0
+            wz = 0.0
+        else:
+            if seg == 1:
+                ang0 = -0.5 * np.pi
+                center_x = cx_ + L - r
+                center_y = cy_ - L + r
+            elif seg == 3:
+                ang0 = 0.0
+                center_x = cx_ + L - r
+                center_y = cy_ + L - r
+            elif seg == 5:
+                ang0 = 0.5 * np.pi
+                center_x = cx_ - L + r
+                center_y = cy_ + L - r
+            else:
+                ang0 = np.pi
+                center_x = cx_ - L + r
+                center_y = cy_ - L + r
+            theta = ang0 + s_loc / r
+            x = center_x + r * np.cos(theta)
+            y = center_y + r * np.sin(theta)
+            yaw = theta + 0.5 * np.pi
+            vx = -speed * np.sin(theta)
+            vy = speed * np.cos(theta)
+            ax = -(speed * speed / r) * np.cos(theta)
+            ay = -(speed * speed / r) * np.sin(theta)
+            wz = speed / r
+
+        cy_yaw, sy_yaw = np.cos(yaw), np.sin(yaw)
+        R = np.array([
+            [cy_yaw, -sy_yaw, 0.0],
+            [sy_yaw, cy_yaw, 0.0],
+            [0.0, 0.0, 1.0],
+        ])
+        p = np.array([x, y, z])
+        v = np.array([vx, vy, vz])
+        a_world = np.array([ax, ay, az])
+        omega_world = np.array([0.0, 0.0, wz])
         return R, p, v, omega_world, a_world
 
     if ENVIRONMENT == "wall":
@@ -438,8 +549,9 @@ def save_data(imu_data, lidar_data):
     print(f"Saved {OUT_DIR}/sim_lidar.npy ({len(lidar_save)} scans)")
 
 
-print("Running trajectory + IMU simulation...")
-imu_data, lidar_data = run_simulation()
-print(f"Generated {len(imu_data)} IMU samples and {len(lidar_data)} LiDAR scans")
-plot_results(imu_data, lidar_data)
-save_data(imu_data, lidar_data)
+if __name__ == "__main__":
+    print("Running trajectory + IMU simulation...")
+    imu_data, lidar_data = run_simulation()
+    print(f"Generated {len(imu_data)} IMU samples and {len(lidar_data)} LiDAR scans")
+    plot_results(imu_data, lidar_data)
+    save_data(imu_data, lidar_data)
