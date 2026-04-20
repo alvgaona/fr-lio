@@ -22,6 +22,14 @@ struct LCKeyframe {
     double timestamp;                        // lidar_end_time of the scan
     Eigen::Isometry3d pose_odom;             // pose in odom frame at insertion
     PointCloudXYZI::Ptr scan_downsampled;    // downsampled body-frame scan
+    // Snapshot of accumulated scan-to-scan CRLB drift covariance at
+    // keyframe-creation time. When lc.use_crlb_edges is enabled, the LC
+    // edge noise between kf_i and kf_j is derived from the cumulative
+    // P_drift (kf_j) - P_drift (kf_i) — i.e. the drift that is expected
+    // to have accumulated between the two visits. Units: 6x6 in
+    // (position, rotation) block order (matching laserMapping.cpp).
+    Eigen::Matrix<double, 6, 6> p_drift_snapshot =
+        Eigen::Matrix<double, 6, 6>::Zero();
 };
 
 /*
