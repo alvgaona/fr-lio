@@ -198,6 +198,7 @@ double lc_last_accepted_time = -1e9;
 double lc_icp_max_dist = 1.5;    // m — max correspondence distance for GICP
 double lc_icp_fitness_thresh = 0.3;  // reject GICP result if mean residual exceeds this
 int    lc_icp_max_iter = 30;
+double lc_max_rel_t_m = 2.0;     // m — reject LC if GICP's final |t_rel| exceeds this
 // iSAM2 graph state — owned by the LC worker thread. Populated incrementally
 // as keyframes arrive and LC edges are accepted.
 std::unique_ptr<gtsam::ISAM2> lc_isam;
@@ -1085,6 +1086,7 @@ public:
         this->declare_parameter<double>("lc.icp_max_dist", 1.5);
         this->declare_parameter<double>("lc.icp_fitness_thresh", 0.3);
         this->declare_parameter<int>("lc.icp_max_iter", 30);
+        this->declare_parameter<double>("lc.max_rel_t_m", 2.0);
         this->declare_parameter<double>("lc.odom_pos_sigma", 0.05);
         this->declare_parameter<double>("lc.odom_rot_sigma", 0.01);
         this->declare_parameter<double>("lc.lc_pos_sigma", 0.15);
@@ -1148,6 +1150,7 @@ public:
         this->get_parameter_or<double>("lc.icp_max_dist", lc_icp_max_dist, 1.5);
         this->get_parameter_or<double>("lc.icp_fitness_thresh", lc_icp_fitness_thresh, 0.3);
         this->get_parameter_or<int>("lc.icp_max_iter", lc_icp_max_iter, 30);
+        this->get_parameter_or<double>("lc.max_rel_t_m", lc_max_rel_t_m, 2.0);
         this->get_parameter_or<double>("lc.odom_pos_sigma", lc_odom_pos_sigma, 0.05);
         this->get_parameter_or<double>("lc.odom_rot_sigma", lc_odom_rot_sigma, 0.01);
         this->get_parameter_or<double>("lc.lc_pos_sigma", lc_lc_pos_sigma, 0.15);
@@ -1209,6 +1212,7 @@ public:
         RCLCPP_INFO(this->get_logger(), "lc.icp_max_dist: %f", lc_icp_max_dist);
         RCLCPP_INFO(this->get_logger(), "lc.icp_fitness_thresh: %f", lc_icp_fitness_thresh);
         RCLCPP_INFO(this->get_logger(), "lc.icp_max_iter: %d", lc_icp_max_iter);
+        RCLCPP_INFO(this->get_logger(), "lc.max_rel_t_m: %f", lc_max_rel_t_m);
         RCLCPP_INFO(this->get_logger(), "mapping.extrinsic_T: [%f, %f, %f]", extrinT[0], extrinT[1], extrinT[2]);
         RCLCPP_INFO(this->get_logger(), "publish.path_en: %d", path_en);
         RCLCPP_INFO(this->get_logger(), "publish.scan_publish_en: %d", scan_pub_en);
@@ -1286,8 +1290,14 @@ public:
         pubPath_ = this->create_publisher<nav_msgs::msg::Path>("path", 20);
         tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
         pubOdomMap_ = this->create_publisher<nav_msgs::msg::Odometry>("odom_map", rclcpp::SensorDataQoS());
-        pubPathCorrected_ = this->create_publisher<nav_msgs::msg::Path>("path_corrected", 1);
-        pubCloudMapCorrected_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("cloud_map_corrected", 1);
+        // Correction outputs fire only on successful LC + map rebuild. Use
+        // transient-local (latched) QoS so rviz / late subscribers always see
+        // the most recent corrected trajectory / cloud, not just what was
+        // published during their subscription window.
+        pubPathCorrected_ = this->create_publisher<nav_msgs::msg::Path>(
+            "path_corrected", rclcpp::QoS(1).transient_local());
+        pubCloudMapCorrected_ = this->create_publisher<sensor_msgs::msg::PointCloud2>(
+            "cloud_map_corrected", rclcpp::QoS(1).transient_local());
 
         //------------------------------------------------------------------------------------------------------
         auto period_ms = std::chrono::milliseconds(static_cast<int64_t>(1000.0 / 100.0));
@@ -1799,6 +1809,18 @@ private:
 
         Eigen::Matrix4f T_cand_cur_f = gicp.getFinalTransformation();
         Eigen::Vector3f t_rel = T_cand_cur_f.topRightCorner<3, 1>();
+
+        // Perceptual-aliasing guard: corridor walls look similar from different
+        // positions, so GICP can converge to wall-to-wall matches that aren't
+        // the same physical region. A well-behaved LC with true revisit has
+        // |t_rel| ~ drift magnitude (<< 1m typically). Reject anything larger.
+        if (t_rel.norm() > lc_max_rel_t_m) {
+            RCLCPP_INFO(this->get_logger(),
+                "lc: rejected kf=%d<-%d |t_rel|=%.3f > max_rel_t=%.3f (likely perceptual aliasing)",
+                kf.source_idx, best_candidate, t_rel.norm(), lc_max_rel_t_m);
+            return;
+        }
+
         RCLCPP_INFO(this->get_logger(),
             "lc: GICP accepted kf=%d<-%d fitness=%.4f |t_rel|=%.3f",
             kf.source_idx, best_candidate, fitness, t_rel.norm());
@@ -1873,6 +1895,19 @@ private:
 
         if (max_dpos < lc_trigger_pos_m && max_drot < lc_trigger_rot_rad) {
             return;  // sub-threshold delta; skip the expensive rebuild
+        }
+
+        // Sanity gate: if PGO wants to shift keyframes by much more than the
+        // GICP-reported relative translation, the LC is inconsistent with the
+        // rest of the graph — likely a false positive that slipped past the
+        // per-correspondence gates. A true revisit: max_dpos ≈ |t_rel|;
+        // false positive: max_dpos >> |t_rel|. Threshold conservatively at 3x.
+        if (max_dpos > 3.0 * static_cast<double>(t_rel.norm())
+            && max_dpos > 1.0) {
+            RCLCPP_WARN(this->get_logger(),
+                "lc: rejecting correction — max_dpos=%.3f >> 3*|t_rel|=%.3f (likely false LC)",
+                max_dpos, 3.0 * t_rel.norm());
+            return;
         }
 
         lc_correction_in_flight.store(true);
