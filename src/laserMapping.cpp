@@ -53,6 +53,14 @@
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
 #include <pcl/filters/voxel_grid.h>
+#include <pcl/registration/gicp.h>
+#include <gtsam/geometry/Pose3.h>
+#include <gtsam/inference/Symbol.h>
+#include <gtsam/nonlinear/ISAM2.h>
+#include <gtsam/nonlinear/NonlinearFactorGraph.h>
+#include <gtsam/nonlinear/Values.h>
+#include <gtsam/slam/BetweenFactor.h>
+#include <gtsam/slam/PriorFactor.h>
 #include <pcl/io/pcd_io.h>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <sensor_msgs/msg/imu.hpp>
@@ -63,6 +71,8 @@
 #include "preprocess.h"
 #include <ikd-Tree/ikd_Tree.h>
 #include "map_correction.hpp"
+#include "lc_keyframe_db.hpp"
+#include "lc_worker.hpp"
 
 #define INIT_TIME           (0.1)
 #define LASER_POINT_COV     (0.001)
@@ -168,6 +178,37 @@ bool use_map_correction = false;
 int cur_source_idx = 0;
 std::vector<Eigen::Isometry3d> keyframe_poses_orig;
 Eigen::Isometry3d T_map_odom = Eigen::Isometry3d::Identity();
+
+/* Loop closure — keyframe DB populated from map_incremental when
+   mapping.enable_lc is true. LC worker thread (future) consumes this
+   DB to detect revisits. Gated by lc_enable. */
+bool lc_enable = false;
+int lc_keyframe_every_scans = 5;
+double lc_keyframe_min_dist = 0.5;  // m
+KeyframeDB lc_keyframe_db;
+int lc_last_kf_scan = 0;
+V3D lc_last_kf_pos = V3D::Zero();
+int lc_scan_counter = 0;
+LCWorker lc_worker;
+int lc_max_queue_size = 32;
+double lc_radius = 8.0;          // m — candidate search radius
+double lc_min_time_gap = 30.0;   // s — minimum time between keyframes for LC candidacy
+double lc_min_spacing = 5.0;     // s — minimum time between accepted LC events
+double lc_last_accepted_time = -1e9;
+double lc_icp_max_dist = 1.5;    // m — max correspondence distance for GICP
+double lc_icp_fitness_thresh = 0.3;  // reject GICP result if mean residual exceeds this
+int    lc_icp_max_iter = 30;
+// iSAM2 graph state — owned by the LC worker thread. Populated incrementally
+// as keyframes arrive and LC edges are accepted.
+std::unique_ptr<gtsam::ISAM2> lc_isam;
+std::mutex mtx_isam;  // guards lc_isam access from worker + any external query
+double lc_odom_pos_sigma = 0.05;  // m — fixed isotropic odom-edge trans noise
+double lc_odom_rot_sigma = 0.01;  // rad — fixed isotropic odom-edge rot noise
+double lc_lc_pos_sigma   = 0.15;  // m — fixed LC-edge trans noise (wider than odom)
+double lc_lc_rot_sigma   = 0.05;  // rad — fixed LC-edge rot noise
+double lc_trigger_pos_m   = 0.10;  // m — fire trigger_correction if any keyframe moves ≥ this
+double lc_trigger_rot_rad = 0.02;  // rad — fire trigger_correction if any keyframe rotates ≥ this
+std::atomic<bool> lc_correction_in_flight{false};
 
 V3F XAxisPoint_body(LIDAR_SP_LEN, 0.0, 0.0);
 V3F XAxisPoint_world(LIDAR_SP_LEN, 0.0, 0.0);
@@ -720,6 +761,34 @@ void map_incremental()
         T_odom_base.translation() = state_point.pos;
         keyframe_poses_orig.push_back(T_odom_base);
         this_source_idx = cur_source_idx++;
+
+        // LC keyframe formation: one keyframe every N scans, OR when motion
+        // exceeds a threshold since the last keyframe. Keyframes are the
+        // granularity at which LC detection + PGO operate; they tag the
+        // same source_idx as shadow-map points so corrections line up.
+        if (lc_enable) {
+            ++lc_scan_counter;
+            V3D delta_pos = state_point.pos - lc_last_kf_pos;
+            bool motion_trigger = delta_pos.norm() > lc_keyframe_min_dist;
+            bool scan_trigger = (lc_scan_counter - lc_last_kf_scan) >= lc_keyframe_every_scans;
+            bool first_kf = (lc_keyframe_db.size() == 0);
+            if (first_kf || motion_trigger || scan_trigger) {
+                LCKeyframe kf;
+                kf.source_idx = this_source_idx;
+                kf.timestamp = lidar_end_time;
+                kf.pose_odom = T_odom_base;
+                // Downsampled body-frame scan from feats_down_body (surf features already
+                // voxel-filtered). Keep a copy so the LC worker can ICP against it later.
+                kf.scan_downsampled = PointCloudXYZI::Ptr(new PointCloudXYZI(*feats_down_body));
+                // Add to DB for spatial queries; enqueue a copy to the worker for
+                // async processing (detection + GICP + PGO, wired in later steps).
+                LCKeyframe kf_for_worker = kf;
+                lc_keyframe_db.add(std::move(kf));
+                lc_worker.enqueue(std::move(kf_for_worker));
+                lc_last_kf_pos = state_point.pos;
+                lc_last_kf_scan = lc_scan_counter;
+            }
+        }
     }
 
     PointVector PointToAdd;
@@ -991,6 +1060,22 @@ public:
         this->declare_parameter<double>("mapping.shadow_voxel_size", 0.2);
         this->declare_parameter<bool>("mapping.enable_map_correction", false);
         this->declare_parameter<string>("map_frame", "map");
+        this->declare_parameter<bool>("lc.enable", false);
+        this->declare_parameter<int>("lc.keyframe_every_scans", 5);
+        this->declare_parameter<double>("lc.keyframe_min_dist", 0.5);
+        this->declare_parameter<int>("lc.max_queue_size", 32);
+        this->declare_parameter<double>("lc.radius", 8.0);
+        this->declare_parameter<double>("lc.min_time_gap", 30.0);
+        this->declare_parameter<double>("lc.min_spacing", 5.0);
+        this->declare_parameter<double>("lc.icp_max_dist", 1.5);
+        this->declare_parameter<double>("lc.icp_fitness_thresh", 0.3);
+        this->declare_parameter<int>("lc.icp_max_iter", 30);
+        this->declare_parameter<double>("lc.odom_pos_sigma", 0.05);
+        this->declare_parameter<double>("lc.odom_rot_sigma", 0.01);
+        this->declare_parameter<double>("lc.lc_pos_sigma", 0.15);
+        this->declare_parameter<double>("lc.lc_rot_sigma", 0.05);
+        this->declare_parameter<double>("lc.trigger_pos_m", 0.10);
+        this->declare_parameter<double>("lc.trigger_rot_rad", 0.02);
         this->declare_parameter<vector<double>>("mapping.extrinsic_T", vector<double>());
         this->declare_parameter<vector<double>>("mapping.extrinsic_R", vector<double>());
 
@@ -1038,6 +1123,28 @@ public:
         this->get_parameter_or<double>("mapping.shadow_voxel_size", shadow_voxel_size, 0.2);
         this->get_parameter_or<bool>("mapping.enable_map_correction", use_map_correction, false);
         this->get_parameter_or<string>("map_frame", map_frame_, "map");
+        this->get_parameter_or<bool>("lc.enable", lc_enable, false);
+        this->get_parameter_or<int>("lc.keyframe_every_scans", lc_keyframe_every_scans, 5);
+        this->get_parameter_or<double>("lc.keyframe_min_dist", lc_keyframe_min_dist, 0.5);
+        this->get_parameter_or<int>("lc.max_queue_size", lc_max_queue_size, 32);
+        this->get_parameter_or<double>("lc.radius", lc_radius, 8.0);
+        this->get_parameter_or<double>("lc.min_time_gap", lc_min_time_gap, 30.0);
+        this->get_parameter_or<double>("lc.min_spacing", lc_min_spacing, 5.0);
+        this->get_parameter_or<double>("lc.icp_max_dist", lc_icp_max_dist, 1.5);
+        this->get_parameter_or<double>("lc.icp_fitness_thresh", lc_icp_fitness_thresh, 0.3);
+        this->get_parameter_or<int>("lc.icp_max_iter", lc_icp_max_iter, 30);
+        this->get_parameter_or<double>("lc.odom_pos_sigma", lc_odom_pos_sigma, 0.05);
+        this->get_parameter_or<double>("lc.odom_rot_sigma", lc_odom_rot_sigma, 0.01);
+        this->get_parameter_or<double>("lc.lc_pos_sigma", lc_lc_pos_sigma, 0.15);
+        this->get_parameter_or<double>("lc.lc_rot_sigma", lc_lc_rot_sigma, 0.05);
+        this->get_parameter_or<double>("lc.trigger_pos_m", lc_trigger_pos_m, 0.10);
+        this->get_parameter_or<double>("lc.trigger_rot_rad", lc_trigger_rot_rad, 0.02);
+        if (lc_enable && !use_map_correction) {
+            RCLCPP_WARN(this->get_logger(),
+                "lc.enable=true requires mapping.enable_map_correction=true; forcing it on");
+            use_map_correction = true;
+            use_shadow_map = true;  // transitive
+        }
         if (use_map_correction && !use_shadow_map) {
             RCLCPP_WARN(this->get_logger(),
                 "mapping.enable_map_correction=true requires mapping.enable_shadow_map=true; forcing enable_shadow_map=true");
@@ -1077,6 +1184,16 @@ public:
         RCLCPP_INFO(this->get_logger(), "mapping.shadow_voxel_size: %f", shadow_voxel_size);
         RCLCPP_INFO(this->get_logger(), "mapping.enable_map_correction: %d", use_map_correction);
         RCLCPP_INFO(this->get_logger(), "map_frame: %s", map_frame_.c_str());
+        RCLCPP_INFO(this->get_logger(), "lc.enable: %d", lc_enable);
+        RCLCPP_INFO(this->get_logger(), "lc.keyframe_every_scans: %d", lc_keyframe_every_scans);
+        RCLCPP_INFO(this->get_logger(), "lc.keyframe_min_dist: %f", lc_keyframe_min_dist);
+        RCLCPP_INFO(this->get_logger(), "lc.max_queue_size: %d", lc_max_queue_size);
+        RCLCPP_INFO(this->get_logger(), "lc.radius: %f", lc_radius);
+        RCLCPP_INFO(this->get_logger(), "lc.min_time_gap: %f", lc_min_time_gap);
+        RCLCPP_INFO(this->get_logger(), "lc.min_spacing: %f", lc_min_spacing);
+        RCLCPP_INFO(this->get_logger(), "lc.icp_max_dist: %f", lc_icp_max_dist);
+        RCLCPP_INFO(this->get_logger(), "lc.icp_fitness_thresh: %f", lc_icp_fitness_thresh);
+        RCLCPP_INFO(this->get_logger(), "lc.icp_max_iter: %d", lc_icp_max_iter);
         RCLCPP_INFO(this->get_logger(), "mapping.extrinsic_T: [%f, %f, %f]", extrinT[0], extrinT[1], extrinT[2]);
         RCLCPP_INFO(this->get_logger(), "publish.path_en: %d", path_en);
         RCLCPP_INFO(this->get_logger(), "publish.scan_publish_en: %d", scan_pub_en);
@@ -1166,11 +1283,21 @@ public:
 
         pubShadowMap_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("cloud_shadow_map", 1);
 
+        if (lc_enable) {
+            lc_worker.set_max_queue_size(static_cast<size_t>(lc_max_queue_size));
+            lc_worker.set_callback([this](const LCKeyframe& kf) {
+                this->lc_on_keyframe(kf);
+            });
+            lc_worker.start();
+            RCLCPP_INFO(this->get_logger(), "LC worker thread started");
+        }
+
         RCLCPP_INFO(this->get_logger(), "Node init finished.");
     }
 
     ~LaserMappingNode()
     {
+        lc_worker.stop();
         fout_out.close();
         fout_pre.close();
         fclose(fp);
@@ -1548,6 +1675,198 @@ private:
      * This is the entry point plan 3's LC thread will call. Plan 2's unit
      * tests call the free `correct_map()` directly to bypass publishing.
      */
+    static gtsam::Pose3 iso_to_gtsam(const Eigen::Isometry3d& T)
+    {
+        return gtsam::Pose3(gtsam::Rot3(T.linear()), gtsam::Point3(T.translation()));
+    }
+
+    static Eigen::Isometry3d gtsam_to_iso(const gtsam::Pose3& P)
+    {
+        Eigen::Isometry3d T = Eigen::Isometry3d::Identity();
+        T.linear() = P.rotation().matrix();
+        T.translation() = P.translation();
+        return T;
+    }
+
+    /*
+     * lc_on_keyframe — runs on the LC worker thread. For each new keyframe:
+     *  1. Query KeyframeDB for revisit candidates (radius + time-gap)
+     *  2. (step 5) Verify via GICP between candidate scan and new scan
+     *  3. (step 6) Add BetweenFactor to iSAM2, incremental update
+     *  4. (step 7) If max pose delta > threshold, call trigger_correction()
+     * Current (step 4): just the candidate search + logging.
+     */
+    void lc_on_keyframe(const LCKeyframe& kf)
+    {
+        // Build up iSAM2 graph incrementally: on every keyframe, add a prior
+        // (for first) or an odom edge (current <- previous) with that edge
+        // initialized from the odom-frame pose of the current keyframe.
+        {
+            std::lock_guard<std::mutex> lock(mtx_isam);
+            if (!lc_isam) {
+                gtsam::ISAM2Params params;
+                params.relinearizeThreshold = 0.01;
+                params.relinearizeSkip = 1;
+                lc_isam = std::make_unique<gtsam::ISAM2>(params);
+            }
+            gtsam::NonlinearFactorGraph graph;
+            gtsam::Values values;
+            gtsam::Symbol key_cur('x', kf.source_idx);
+
+            if (lc_keyframe_db.size() == 1) {
+                // First keyframe: add PriorFactor to anchor the graph.
+                auto prior_noise = gtsam::noiseModel::Diagonal::Sigmas(
+                    (gtsam::Vector(6) << 1e-6, 1e-6, 1e-6, 1e-6, 1e-6, 1e-6).finished());
+                graph.add(gtsam::PriorFactor<gtsam::Pose3>(
+                    key_cur, iso_to_gtsam(kf.pose_odom), prior_noise));
+                values.insert(key_cur, iso_to_gtsam(kf.pose_odom));
+            } else {
+                // Subsequent keyframes: add between-factor to previous keyframe.
+                // The relative-pose measurement comes from the odom estimates.
+                LCKeyframe prev = lc_keyframe_db.get(static_cast<int>(lc_keyframe_db.size()) - 2);
+                Eigen::Isometry3d T_prev_cur = prev.pose_odom.inverse() * kf.pose_odom;
+                auto odom_noise = gtsam::noiseModel::Diagonal::Sigmas(
+                    (gtsam::Vector(6) << lc_odom_rot_sigma, lc_odom_rot_sigma, lc_odom_rot_sigma,
+                                          lc_odom_pos_sigma, lc_odom_pos_sigma, lc_odom_pos_sigma).finished());
+                gtsam::Symbol key_prev('x', prev.source_idx);
+                graph.add(gtsam::BetweenFactor<gtsam::Pose3>(
+                    key_prev, key_cur, iso_to_gtsam(T_prev_cur), odom_noise));
+                values.insert(key_cur, iso_to_gtsam(kf.pose_odom));
+            }
+            lc_isam->update(graph, values);
+        }
+
+        auto candidates = lc_keyframe_db.radius_search(
+            kf.pose_odom.translation(),
+            lc_radius, kf.timestamp, lc_min_time_gap);
+
+        static rclcpp::Clock lc_log_clock(RCL_ROS_TIME);
+        RCLCPP_INFO_THROTTLE(this->get_logger(), lc_log_clock, 2000,
+            "lc_worker: kf_idx=%d db_size=%zu candidates=%zu processed=%zu dropped=%zu",
+            kf.source_idx, lc_keyframe_db.size(), candidates.size(),
+            lc_worker.processed_count(), lc_worker.dropped_count());
+
+        if (candidates.empty()) return;
+        if (kf.timestamp - lc_last_accepted_time < lc_min_spacing) return;
+
+        // GICP verification: try to register the current keyframe scan against
+        // the nearest candidate. Initial guess from relative odom poses. Reject
+        // if ICP doesn't converge or the fitness score (mean sq residual on
+        // correspondences) exceeds the threshold.
+        int best_candidate = candidates.front();
+        LCKeyframe cand = lc_keyframe_db.get(best_candidate);
+
+        // Initial guess: T_cand^cur = T_cand^odom^{-1} · T_cur^odom
+        Eigen::Isometry3d T_guess = cand.pose_odom.inverse() * kf.pose_odom;
+        Eigen::Matrix4f init_guess = T_guess.matrix().cast<float>();
+
+        pcl::GeneralizedIterativeClosestPoint<PointType, PointType> gicp;
+        gicp.setInputSource(kf.scan_downsampled);
+        gicp.setInputTarget(cand.scan_downsampled);
+        gicp.setMaxCorrespondenceDistance(lc_icp_max_dist);
+        gicp.setMaximumIterations(lc_icp_max_iter);
+        gicp.setTransformationEpsilon(1e-6);
+        PointCloudXYZI aligned;
+        gicp.align(aligned, init_guess);
+
+        if (!gicp.hasConverged()) {
+            RCLCPP_INFO(this->get_logger(),
+                "lc: GICP no-converge kf=%d<-%d", kf.source_idx, best_candidate);
+            return;
+        }
+        double fitness = gicp.getFitnessScore();
+        if (fitness > lc_icp_fitness_thresh) {
+            RCLCPP_INFO(this->get_logger(),
+                "lc: GICP rejected kf=%d<-%d fitness=%.4f > thresh=%.4f",
+                kf.source_idx, best_candidate, fitness, lc_icp_fitness_thresh);
+            return;
+        }
+
+        Eigen::Matrix4f T_cand_cur_f = gicp.getFinalTransformation();
+        Eigen::Vector3f t_rel = T_cand_cur_f.topRightCorner<3, 1>();
+        RCLCPP_INFO(this->get_logger(),
+            "lc: GICP accepted kf=%d<-%d fitness=%.4f |t_rel|=%.3f",
+            kf.source_idx, best_candidate, fitness, t_rel.norm());
+        lc_last_accepted_time = kf.timestamp;
+
+        // Add LC BetweenFactor to iSAM2 and run an incremental update.
+        Eigen::Isometry3d T_cand_cur = Eigen::Isometry3d::Identity();
+        T_cand_cur.matrix() = T_cand_cur_f.cast<double>();
+        {
+            std::lock_guard<std::mutex> lock(mtx_isam);
+            if (!lc_isam) return;  // shouldn't happen — graph was initialized above
+            gtsam::NonlinearFactorGraph lc_graph;
+            auto lc_noise = gtsam::noiseModel::Diagonal::Sigmas(
+                (gtsam::Vector(6) << lc_lc_rot_sigma, lc_lc_rot_sigma, lc_lc_rot_sigma,
+                                      lc_lc_pos_sigma, lc_lc_pos_sigma, lc_lc_pos_sigma).finished());
+            gtsam::Symbol key_cand('x', cand.source_idx);
+            gtsam::Symbol key_cur('x', kf.source_idx);
+            lc_graph.add(gtsam::BetweenFactor<gtsam::Pose3>(
+                key_cand, key_cur, iso_to_gtsam(T_cand_cur), lc_noise));
+            lc_isam->update(lc_graph, gtsam::Values());
+            // Extra relinearization steps help iSAM2 propagate the LC impact
+            // through the full tree rather than just one tree hop.
+            lc_isam->update();
+            lc_isam->update();
+        }
+
+        // Pull the corrected trajectory out of iSAM2 and decide whether to
+        // fire `trigger_correction`. We compare the new estimates against the
+        // `keyframe_poses_orig` shared with the map-correction plan; if any
+        // keyframe moved more than the position / rotation thresholds, fire.
+        std::vector<Eigen::Isometry3d> corrected_poses;
+        {
+            std::lock_guard<std::mutex> lock(mtx_isam);
+            gtsam::Values est = lc_isam->calculateEstimate();
+            // Poses are indexed by source_idx, which matches
+            // keyframe_poses_orig's order (sequential, one per map_incremental
+            // call when use_map_correction is true).
+            size_t n = keyframe_poses_orig.size();
+            corrected_poses.reserve(n);
+            for (size_t k = 0; k < n; ++k) {
+                gtsam::Symbol key('x', static_cast<int>(k));
+                if (!est.exists(key)) {
+                    // Fallback: if iSAM2 doesn't know this key (shouldn't happen
+                    // for keys created via map_incremental), preserve the prior.
+                    corrected_poses.push_back(keyframe_poses_orig[k]);
+                } else {
+                    corrected_poses.push_back(gtsam_to_iso(est.at<gtsam::Pose3>(key)));
+                }
+            }
+        }
+
+        // Coalesce: if a correction is already in flight, skip firing another.
+        // The next accepted LC will re-evaluate against the post-correction
+        // keyframe_poses_orig (which trigger_correction replaces on success).
+        if (lc_correction_in_flight.load()) {
+            RCLCPP_INFO(this->get_logger(),
+                "lc: correction already in flight, coalescing");
+            return;
+        }
+
+        double max_dpos = 0.0;
+        double max_drot = 0.0;
+        for (size_t k = 0; k < corrected_poses.size(); ++k) {
+            Eigen::Isometry3d d = corrected_poses[k].inverse() * keyframe_poses_orig[k];
+            max_dpos = std::max(max_dpos, d.translation().norm());
+            Eigen::AngleAxisd aa(d.linear());
+            max_drot = std::max(max_drot, std::abs(aa.angle()));
+        }
+        RCLCPP_INFO(this->get_logger(),
+            "lc: PGO update max_dpos=%.3f m, max_drot=%.4f rad (thresh: %.3f / %.4f)",
+            max_dpos, max_drot, lc_trigger_pos_m, lc_trigger_rot_rad);
+
+        if (max_dpos < lc_trigger_pos_m && max_drot < lc_trigger_rot_rad) {
+            return;  // sub-threshold delta; skip the expensive rebuild
+        }
+
+        lc_correction_in_flight.store(true);
+        int n_corrected = trigger_correction(corrected_poses);
+        lc_correction_in_flight.store(false);
+        RCLCPP_INFO(this->get_logger(),
+            "lc: trigger_correction returned %d (shadow points)", n_corrected);
+    }
+
     int trigger_correction(const std::vector<Eigen::Isometry3d>& corrected_poses)
     {
         int n = correct_map(corrected_poses);
