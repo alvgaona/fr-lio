@@ -237,8 +237,10 @@ std::atomic<double> metric_correct_map_total_ms{0.0};
 std::atomic<double> metric_correct_map_max_ms{0.0};
 V3D metric_first_pos = V3D::Zero();
 V3D metric_last_pos  = V3D::Zero();
+V3D metric_prev_pos  = V3D::Zero();
 bool metric_first_pos_set = false;
 double metric_tmo_final = 0.0;
+double metric_path_length_m = 0.0;
 
 V3F XAxisPoint_body(LIDAR_SP_LEN, 0.0, 0.0);
 V3F XAxisPoint_world(LIDAR_SP_LEN, 0.0, 0.0);
@@ -424,6 +426,21 @@ void points_cache_collect()
     PointVector points_history;
     ikdtree.acquire_removed_points(points_history);
     if (!use_shadow_map || points_history.empty()) return;
+
+    // Pre-transform evictions to the current map frame so the shadow tree
+    // is consistently in one frame between corrections. Without this, a
+    // point evicted between LCs would enter shadow in odom frame while
+    // previously-corrected neighbors are in map frame, and the next
+    // correct_map call would apply wrong deltas to the mix.
+    if (use_map_correction) {
+        for (auto& p : points_history) {
+            Eigen::Vector3d pw(p.x, p.y, p.z);
+            Eigen::Vector3d pw_new = T_map_odom * pw;
+            p.x = static_cast<float>(pw_new.x());
+            p.y = static_cast<float>(pw_new.y());
+            p.z = static_cast<float>(pw_new.z());
+        }
+    }
 
     PointVector to_insert;
     to_insert.reserve(points_history.size());
@@ -1372,10 +1389,22 @@ public:
         double isam_mean = ic > 0 ? metric_isam_total_ms.load() / ic : 0.0;
         double cm_mean = cf > 0 ? metric_correct_map_total_ms.load() / cf : 0.0;
         V3D travel = metric_last_pos - metric_first_pos;
+        // Compose filter's last pose with T_map_odom to get map-frame endpoint.
+        // For configs without map correction, T_map_odom is identity so
+        // map-frame metrics equal odom-frame metrics.
+        V3D map_last_pos = T_map_odom * metric_last_pos;
+        V3D map_travel = map_last_pos - metric_first_pos;
         printf("\n==================== METRICS ====================\n");
         printf("TRAJ first_pos: [%.3f, %.3f, %.3f]\n", metric_first_pos.x(), metric_first_pos.y(), metric_first_pos.z());
-        printf("TRAJ last_pos:  [%.3f, %.3f, %.3f]\n", metric_last_pos.x(), metric_last_pos.y(), metric_last_pos.z());
-        printf("TRAJ net_travel_m: %.3f\n", travel.norm());
+        printf("TRAJ last_pos_odom:  [%.3f, %.3f, %.3f]\n", metric_last_pos.x(), metric_last_pos.y(), metric_last_pos.z());
+        printf("TRAJ last_pos_map:   [%.3f, %.3f, %.3f]\n", map_last_pos.x(), map_last_pos.y(), map_last_pos.z());
+        printf("TRAJ drift_odom_m: %.3f\n", travel.norm());
+        printf("TRAJ drift_map_m:  %.3f\n", map_travel.norm());
+        printf("TRAJ path_length_m: %.3f\n", metric_path_length_m);
+        double drift_pct_odom = metric_path_length_m > 0.01 ? 100.0 * travel.norm() / metric_path_length_m : 0.0;
+        double drift_pct_map  = metric_path_length_m > 0.01 ? 100.0 * map_travel.norm() / metric_path_length_m : 0.0;
+        printf("TRAJ drift_pct_odom: %.2f\n", drift_pct_odom);
+        printf("TRAJ drift_pct_map:  %.2f\n", drift_pct_map);
         printf("TRAJ final_t_map_odom_m: %.3f\n", metric_tmo_final);
         printf("LC candidates_total: %d\n", metric_lc_candidates_total.load());
         printf("LC accepted: %d\n", metric_lc_accepted.load());
@@ -2222,11 +2251,16 @@ private:
         odom.twist.twist.angular.z = omega_filtered_(2);
 
         pubOdomAftMapped_->publish(odom);
+        V3D cur_pos(prop_pos(0), prop_pos(1), prop_pos(2));
         if (!metric_first_pos_set) {
-            metric_first_pos = V3D(prop_pos(0), prop_pos(1), prop_pos(2));
+            metric_first_pos = cur_pos;
+            metric_prev_pos  = cur_pos;
             metric_first_pos_set = true;
+        } else {
+            metric_path_length_m += (cur_pos - metric_prev_pos).norm();
+            metric_prev_pos = cur_pos;
         }
-        metric_last_pos = V3D(prop_pos(0), prop_pos(1), prop_pos(2));
+        metric_last_pos = cur_pos;
 
         if (tf_pub_en_) {
             geometry_msgs::msg::TransformStamped trans;
