@@ -756,38 +756,53 @@ void map_incremental()
 {
     int this_source_idx = -1;
     if (use_map_correction) {
+        // Keyframe-grained source_idx: increment only when a new LC keyframe
+        // is formed (or at the very first scan). All map points inserted
+        // between consecutive keyframes carry the SAME source_idx → they all
+        // receive the same Δ during correction, driven by the keyframe's
+        // pose correction in iSAM2. This matches LIO-SAM's design and is
+        // required so that iSAM2 (which only has nodes for LC keyframes)
+        // produces corrections indexed by the same source_idx stamped on
+        // shadow-map points.
         Eigen::Isometry3d T_odom_base = Eigen::Isometry3d::Identity();
         T_odom_base.linear() = state_point.rot.toRotationMatrix();
         T_odom_base.translation() = state_point.pos;
-        keyframe_poses_orig.push_back(T_odom_base);
-        this_source_idx = cur_source_idx++;
 
-        // LC keyframe formation: one keyframe every N scans, OR when motion
-        // exceeds a threshold since the last keyframe. Keyframes are the
-        // granularity at which LC detection + PGO operate; they tag the
-        // same source_idx as shadow-map points so corrections line up.
+        bool form_lc_keyframe = false;
         if (lc_enable) {
             ++lc_scan_counter;
             V3D delta_pos = state_point.pos - lc_last_kf_pos;
             bool motion_trigger = delta_pos.norm() > lc_keyframe_min_dist;
             bool scan_trigger = (lc_scan_counter - lc_last_kf_scan) >= lc_keyframe_every_scans;
             bool first_kf = (lc_keyframe_db.size() == 0);
-            if (first_kf || motion_trigger || scan_trigger) {
+            form_lc_keyframe = first_kf || motion_trigger || scan_trigger;
+        } else {
+            // LC disabled: treat every scan as its own "keyframe" so per-scan
+            // source_idx tagging still works for synthetic correction paths
+            // (e.g. unit tests or manual PGO output).
+            form_lc_keyframe = true;
+        }
+
+        if (form_lc_keyframe) {
+            keyframe_poses_orig.push_back(T_odom_base);
+            this_source_idx = cur_source_idx++;
+
+            if (lc_enable) {
                 LCKeyframe kf;
                 kf.source_idx = this_source_idx;
                 kf.timestamp = lidar_end_time;
                 kf.pose_odom = T_odom_base;
-                // Downsampled body-frame scan from feats_down_body (surf features already
-                // voxel-filtered). Keep a copy so the LC worker can ICP against it later.
                 kf.scan_downsampled = PointCloudXYZI::Ptr(new PointCloudXYZI(*feats_down_body));
-                // Add to DB for spatial queries; enqueue a copy to the worker for
-                // async processing (detection + GICP + PGO, wired in later steps).
                 LCKeyframe kf_for_worker = kf;
                 lc_keyframe_db.add(std::move(kf));
                 lc_worker.enqueue(std::move(kf_for_worker));
                 lc_last_kf_pos = state_point.pos;
                 lc_last_kf_scan = lc_scan_counter;
             }
+        } else {
+            // Not a keyframe: inherit the source_idx of the most recent
+            // keyframe so points we insert this scan share its Δ.
+            this_source_idx = cur_source_idx - 1;
         }
     }
 
