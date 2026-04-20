@@ -134,4 +134,28 @@ install(
   DESTINATION share/${PROJECT_NAME}
 )
 
+# ---------------- Tests --------------- #
+if(BUILD_TESTING)
+  find_package(ament_cmake_gtest REQUIRED)
+
+  ament_add_gtest(test_map_correction
+    test/test_map_correction.cpp
+  )
+  target_include_directories(test_map_correction PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    ${PCL_INCLUDE_DIRS}
+  )
+  target_link_libraries(test_map_correction ${PCL_LIBRARIES} ${PYTHON_LIBRARIES} Eigen3::Eigen)
+  ament_target_dependencies(test_map_correction rclcpp sensor_msgs nav_msgs)
+
+  if($ENV{ROS_DISTRO} IN_LIST EOL_LIST)
+    rosidl_target_interfaces(test_map_correction
+      ${PROJECT_NAME} "rosidl_typesupport_cpp")
+  else()
+    rosidl_get_typesupport_target(cpp_typesupport_target
+      ${PROJECT_NAME} "rosidl_typesupport_cpp")
+    target_link_libraries(test_map_correction ${cpp_typesupport_target})
+  endif()
+endif()
+
 ament_package()

@@ -36,6 +36,7 @@
 #include <mutex>
 #include <math.h>
 #include <thread>
+#include <unordered_set>
 #include <fstream>
 #include <csignal>
 #include <chrono>
@@ -55,13 +56,13 @@
 #include <pcl/io/pcd_io.h>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <sensor_msgs/msg/imu.hpp>
-#include <std_srvs/srv/trigger.hpp>
 #include <tf2_ros/transform_broadcaster.h>
 #include <geometry_msgs/msg/transform_stamped.hpp>
 #include <geometry_msgs/msg/vector3.hpp>
 #include <livox_ros_driver2/msg/custom_msg.hpp>
 #include "preprocess.h"
 #include <ikd-Tree/ikd_Tree.h>
+#include "map_correction.hpp"
 
 #define INIT_TIME           (0.1)
 #define LASER_POINT_COV     (0.001)
@@ -73,7 +74,7 @@ double kdtree_incremental_time = 0.0, kdtree_search_time = 0.0, kdtree_delete_ti
 double T1[MAXN], s_plot[MAXN], s_plot2[MAXN], s_plot3[MAXN], s_plot4[MAXN], s_plot5[MAXN], s_plot6[MAXN], s_plot7[MAXN], s_plot8[MAXN], s_plot9[MAXN], s_plot10[MAXN], s_plot11[MAXN];
 double match_time = 0, solve_time = 0, solve_const_H_time = 0;
 int    kdtree_size_st = 0, kdtree_size_end = 0, add_point_size = 0, kdtree_delete_counter = 0;
-bool   runtime_pos_log = false, pcd_save_en = false, time_sync_en = false, extrinsic_est_en = true, path_en = true;
+bool   runtime_pos_log = false, time_sync_en = false, extrinsic_est_en = true, path_en = true;
 bool use_scan_to_scan_cov = false;
 PointCloudXYZI::Ptr feats_down_body_prev(new PointCloudXYZI());
 pcl::KdTreeFLANN<PointType> kdtree_prev_scan;
@@ -104,6 +105,7 @@ float DET_RANGE = 300.0f;
 const float MOV_THRESHOLD = 1.5f;
 double time_diff_lidar_to_imu = 0.0;
 bool use_perpoint_cov = false;
+double huber_k = 3.0;  // Huber cap on standardized residual |r|/√R_i; inflates R_i above this
 double point_range_noise_std = 0.02;
 double point_range_noise_var = 0.0004;
 
@@ -111,7 +113,7 @@ mutex mtx_buffer;
 condition_variable sig_buffer;
 
 string root_dir = ROOT_DIR;
-string map_file_path, lid_topic, imu_topic;
+string lid_topic, imu_topic;
 
 double res_mean_last = 0.05, total_residual = 0.0;
 double last_timestamp_lidar = 0, last_timestamp_imu = -1.0;
@@ -119,7 +121,7 @@ double gyr_cov = 0.1, acc_cov = 0.1, b_gyr_cov = 0.0001, b_acc_cov = 0.0001;
 double filter_size_corner_min = 0, filter_size_surf_min = 0, filter_size_map_min = 0, fov_deg = 0;
 double cube_len = 0, HALF_FOV_COS = 0, FOV_DEG = 0, total_distance = 0, lidar_end_time = 0, first_lidar_time = 0.0;
 int    effct_feat_num = 0, time_log_counter = 0, scan_count = 0, publish_count = 0;
-int    iterCount = 0, feats_down_size = 0, NUM_MAX_ITERATIONS = 0, laserCloudValidNum = 0, pcd_save_interval = -1, pcd_index = 0;
+int    iterCount = 0, feats_down_size = 0, NUM_MAX_ITERATIONS = 0, laserCloudValidNum = 0;
 bool   point_selected_surf[100000] = {0};
 bool   lidar_pushed, flg_first_scan = true, flg_exit = false, flg_EKF_inited;
 bool   scan_pub_en = false, dense_pub_en = false, scan_body_pub_en = false;
@@ -147,6 +149,25 @@ pcl::VoxelGrid<PointType> downSizeFilterSurf;
 pcl::VoxelGrid<PointType> downSizeFilterMap;
 
 KD_TREE<PointType> ikdtree;
+
+/* Shadow global map — preserves points evicted from the working tree via
+   voxel-deduplicated absorption. Gated by mapping.enable_shadow_map.
+   Voxel key and shadow_voxel_key live in map_correction.hpp. */
+KD_TREE<PointType> global_ikdtree;
+std::unordered_set<VoxelKey, VoxelKeyHash> global_voxel_set;
+std::mutex mtx_global_map;
+bool use_shadow_map = false;
+double shadow_voxel_size = 0.2;
+
+/* Source-pose-tagged map correction — every point inserted into the working
+   ikd-Tree (and therefore inherited by the shadow tree on eviction) carries
+   the index of its source keyframe in `normal_x`. On loop closure, the
+   shadow tree is rebuilt by transforming each point by the Δ of its source
+   keyframe. Gated by mapping.enable_map_correction. */
+bool use_map_correction = false;
+int cur_source_idx = 0;
+std::vector<Eigen::Isometry3d> keyframe_poses_orig;
+Eigen::Isometry3d T_map_odom = Eigen::Isometry3d::Identity();
 
 V3F XAxisPoint_body(LIDAR_SP_LEN, 0.0, 0.0);
 V3F XAxisPoint_world(LIDAR_SP_LEN, 0.0, 0.0);
@@ -265,11 +286,98 @@ void RGBpointBodyLidarToIMU(PointType const * const pi, PointType * const po)
     po->intensity = pi->intensity;
 }
 
+void publish_path_corrected_(rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pub,
+                             const std::string& frame_id,
+                             const rclcpp::Time& stamp,
+                             const std::vector<Eigen::Isometry3d>& poses)
+{
+    nav_msgs::msg::Path msg;
+    msg.header.frame_id = frame_id;
+    msg.header.stamp = stamp;
+    msg.poses.reserve(poses.size());
+    for (const auto& T : poses) {
+        geometry_msgs::msg::PoseStamped ps;
+        ps.header = msg.header;
+        ps.pose.position.x = T.translation().x();
+        ps.pose.position.y = T.translation().y();
+        ps.pose.position.z = T.translation().z();
+        Eigen::Quaterniond q(T.linear());
+        q.normalize();
+        ps.pose.orientation.x = q.x();
+        ps.pose.orientation.y = q.y();
+        ps.pose.orientation.z = q.z();
+        ps.pose.orientation.w = q.w();
+        msg.poses.push_back(ps);
+    }
+    pub->publish(msg);
+}
+
+void publish_cloud_corrected_(rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub,
+                              const std::string& frame_id,
+                              const rclcpp::Time& stamp,
+                              const PointVector& points)
+{
+    if (points.empty()) return;
+    PointCloudXYZI::Ptr cloud(new PointCloudXYZI());
+    cloud->points.assign(points.begin(), points.end());
+    cloud->width = cloud->points.size();
+    cloud->height = 1;
+    cloud->is_dense = false;
+    sensor_msgs::msg::PointCloud2 msg;
+    pcl::toROSMsg(*cloud, msg);
+    msg.header.frame_id = frame_id;
+    msg.header.stamp = stamp;
+    pub->publish(msg);
+}
+
+/*
+ * correct_map(corrected_poses) — thin wrapper forwarding globals to the
+ * pure `correct_map_core` in map_correction.hpp. Acquires the shadow-tree
+ * mutex. Only meaningful when `use_map_correction` is true.
+ */
+int correct_map(const std::vector<Eigen::Isometry3d>& corrected_poses)
+{
+    if (!use_map_correction) return -1;
+    std::lock_guard<std::mutex> lock(mtx_global_map);
+    return correct_map_core(
+        corrected_poses,
+        keyframe_poses_orig,
+        global_ikdtree,
+        global_voxel_set,
+        shadow_voxel_size,
+        T_map_odom);
+}
+
 void points_cache_collect()
 {
     PointVector points_history;
     ikdtree.acquire_removed_points(points_history);
-    // for (int i = 0; i < points_history.size(); i++) _featsArray->push_back(points_history[i]);
+    if (!use_shadow_map || points_history.empty()) return;
+
+    PointVector to_insert;
+    to_insert.reserve(points_history.size());
+    size_t evicted = points_history.size();
+    {
+        std::lock_guard<std::mutex> lock(mtx_global_map);
+        for (const auto& p : points_history) {
+            VoxelKey k = shadow_voxel_key(p.x, p.y, p.z, shadow_voxel_size);
+            if (global_voxel_set.insert(k).second) {
+                to_insert.push_back(p);
+            }
+        }
+        if (!to_insert.empty()) {
+            if (global_ikdtree.Root_Node == nullptr) {
+                global_ikdtree.Build(to_insert);
+            } else {
+                global_ikdtree.Add_Points(to_insert, false);
+            }
+        }
+    }
+    static rclcpp::Clock shadow_log_clock(RCL_ROS_TIME);
+    RCLCPP_INFO_THROTTLE(rclcpp::get_logger("laser_mapping"), shadow_log_clock, 2000,
+        "shadow_map: evicted=%zu inserted=%zu dedup=%zu working=%d shadow=%d",
+        evicted, to_insert.size(), evicted - to_insert.size(),
+        ikdtree.validnum(), global_ikdtree.validnum());
 }
 
 BoxPointType LocalMap_Points;
@@ -295,6 +403,15 @@ void lasermap_fov_segment()
         dist_to_map_edge[i][0] = fabs(pos_LiD(i) - LocalMap_Points.vertex_min[i]);
         dist_to_map_edge[i][1] = fabs(pos_LiD(i) - LocalMap_Points.vertex_max[i]);
         if (dist_to_map_edge[i][0] <= MOV_THRESHOLD * DET_RANGE || dist_to_map_edge[i][1] <= MOV_THRESHOLD * DET_RANGE) need_move = true;
+    }
+    {
+        static rclcpp::Clock fov_log_clock(RCL_ROS_TIME);
+        RCLCPP_INFO_THROTTLE(rclcpp::get_logger("laser_mapping"), fov_log_clock, 2000,
+            "fov_segment: pos_LiD=[%.2f,%.2f,%.2f] cube=[%.1f,%.1f,%.1f]..[%.1f,%.1f,%.1f] need_move=%d",
+            pos_LiD(0), pos_LiD(1), pos_LiD(2),
+            LocalMap_Points.vertex_min[0], LocalMap_Points.vertex_min[1], LocalMap_Points.vertex_min[2],
+            LocalMap_Points.vertex_max[0], LocalMap_Points.vertex_max[1], LocalMap_Points.vertex_max[2],
+            need_move ? 1 : 0);
     }
     if (!need_move) return;
     BoxPointType New_LocalMap_Points, tmp_boxpoints;
@@ -596,6 +713,15 @@ void compute_scan_to_scan_covariance(
 int process_increments = 0;
 void map_incremental()
 {
+    int this_source_idx = -1;
+    if (use_map_correction) {
+        Eigen::Isometry3d T_odom_base = Eigen::Isometry3d::Identity();
+        T_odom_base.linear() = state_point.rot.toRotationMatrix();
+        T_odom_base.translation() = state_point.pos;
+        keyframe_poses_orig.push_back(T_odom_base);
+        this_source_idx = cur_source_idx++;
+    }
+
     PointVector PointToAdd;
     PointVector PointNoNeedDownsample;
     PointToAdd.reserve(feats_down_size);
@@ -604,6 +730,9 @@ void map_incremental()
     {
         /* transform to world frame */
         pointBodyToWorld(&(feats_down_body->points[i]), &(feats_down_world->points[i]));
+        if (use_map_correction) {
+            feats_down_world->points[i].normal_x = static_cast<float>(this_source_idx);
+        }
         /* decide if need add to map */
         if (!Nearest_Points[i].empty() && flg_EKF_inited)
         {
@@ -644,12 +773,6 @@ void map_incremental()
 }
 
 PointCloudXYZI::Ptr pcl_wait_pub(new PointCloudXYZI());
-PointCloudXYZI::Ptr pcl_wait_save(new PointCloudXYZI());
-void save_to_pcd()
-{
-    pcl::PCDWriter pcd_writer;
-    pcd_writer.writeBinary(map_file_path, *pcl_wait_pub);
-}
 
 template<typename T>
 void set_posestamp(T & out)
@@ -727,6 +850,18 @@ void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_
                     Eigen::Vector3d n_w(pabcd(0), pabcd(1), pabcd(2));
                     double R_i = point_range_noise_var
                                  + (n_w.transpose() * sigma_p * n_w)(0);
+
+                    // Huber-style soft gating: instead of rejecting outliers (which
+                    // cascades into divergence when many correspondences drift
+                    // together), inflate R_i so the effective std-residual is capped
+                    // at `huber_k`. Correspondences with |r|/√R_i ≤ k pass unchanged;
+                    // beyond that, R_i = r²/k² so r/√R_i = k. This is the Kalman
+                    // analogue of the Huber M-estimator — principled, smooth, robust.
+                    const double r_abs = std::abs(static_cast<double>(pd2));
+                    const double r_std = r_abs / std::sqrt(R_i);
+                    if (r_std > huber_k) {
+                        R_i = (r_abs * r_abs) / (huber_k * huber_k);
+                    }
                     normvec->points[i].curvature = static_cast<float>(R_i);
                 } else {
                     normvec->points[i].curvature = static_cast<float>(LASER_POINT_COV);
@@ -825,7 +960,6 @@ public:
         this->declare_parameter<bool>("publish.dense_publish_en", true);
         this->declare_parameter<bool>("publish.scan_bodyframe_pub_en", true);
         this->declare_parameter<int>("max_iteration", 4);
-        this->declare_parameter<string>("map_file_path", "");
         this->declare_parameter<string>("common.lid_topic", "/livox/lidar");
         this->declare_parameter<string>("common.imu_topic", "/livox/imu");
         this->declare_parameter<bool>("common.time_sync_en", false);
@@ -852,8 +986,11 @@ public:
         this->declare_parameter<bool>("mapping.use_scan_to_scan_cov", false);
         this->declare_parameter<bool>("mapping.use_perpoint_cov", false);
         this->declare_parameter<double>("mapping.point_range_noise_std", 0.02);
-        this->declare_parameter<bool>("pcd_save.pcd_save_en", false);
-        this->declare_parameter<int>("pcd_save.interval", -1);
+        this->declare_parameter<double>("mapping.huber_k", 3.0);
+        this->declare_parameter<bool>("mapping.enable_shadow_map", false);
+        this->declare_parameter<double>("mapping.shadow_voxel_size", 0.2);
+        this->declare_parameter<bool>("mapping.enable_map_correction", false);
+        this->declare_parameter<string>("map_frame", "map");
         this->declare_parameter<vector<double>>("mapping.extrinsic_T", vector<double>());
         this->declare_parameter<vector<double>>("mapping.extrinsic_R", vector<double>());
 
@@ -869,7 +1006,6 @@ public:
         this->get_parameter_or<bool>("publish.dense_publish_en", dense_pub_en, true);
         this->get_parameter_or<bool>("publish.scan_bodyframe_pub_en", scan_body_pub_en, true);
         this->get_parameter_or<int>("max_iteration", NUM_MAX_ITERATIONS, 4);
-        this->get_parameter_or<string>("map_file_path", map_file_path, "");
         this->get_parameter_or<string>("common.lid_topic", lid_topic, "/livox/lidar");
         this->get_parameter_or<string>("common.imu_topic", imu_topic,"/livox/imu");
         this->get_parameter_or<bool>("common.time_sync_en", time_sync_en, false);
@@ -897,8 +1033,16 @@ public:
         this->get_parameter_or<bool>("mapping.use_perpoint_cov", use_perpoint_cov, false);
         this->get_parameter_or<double>("mapping.point_range_noise_std", point_range_noise_std, 0.02);
         point_range_noise_var = point_range_noise_std * point_range_noise_std;
-        this->get_parameter_or<bool>("pcd_save.pcd_save_en", pcd_save_en, false);
-        this->get_parameter_or<int>("pcd_save.interval", pcd_save_interval, -1);
+        this->get_parameter_or<double>("mapping.huber_k", huber_k, 3.0);
+        this->get_parameter_or<bool>("mapping.enable_shadow_map", use_shadow_map, false);
+        this->get_parameter_or<double>("mapping.shadow_voxel_size", shadow_voxel_size, 0.2);
+        this->get_parameter_or<bool>("mapping.enable_map_correction", use_map_correction, false);
+        this->get_parameter_or<string>("map_frame", map_frame_, "map");
+        if (use_map_correction && !use_shadow_map) {
+            RCLCPP_WARN(this->get_logger(),
+                "mapping.enable_map_correction=true requires mapping.enable_shadow_map=true; forcing enable_shadow_map=true");
+            use_shadow_map = true;
+        }
         this->get_parameter_or<vector<double>>("mapping.extrinsic_T", extrinT, vector<double>());
         this->get_parameter_or<vector<double>>("mapping.extrinsic_R", extrinR, vector<double>());
 
@@ -928,12 +1072,16 @@ public:
         RCLCPP_INFO(this->get_logger(), "mapping.use_scan_to_scan_cov: %d", use_scan_to_scan_cov);
         RCLCPP_INFO(this->get_logger(), "mapping.use_perpoint_cov: %d", use_perpoint_cov);
         RCLCPP_INFO(this->get_logger(), "mapping.point_range_noise_std: %f", point_range_noise_std);
+        RCLCPP_INFO(this->get_logger(), "mapping.huber_k: %f", huber_k);
+        RCLCPP_INFO(this->get_logger(), "mapping.enable_shadow_map: %d", use_shadow_map);
+        RCLCPP_INFO(this->get_logger(), "mapping.shadow_voxel_size: %f", shadow_voxel_size);
+        RCLCPP_INFO(this->get_logger(), "mapping.enable_map_correction: %d", use_map_correction);
+        RCLCPP_INFO(this->get_logger(), "map_frame: %s", map_frame_.c_str());
         RCLCPP_INFO(this->get_logger(), "mapping.extrinsic_T: [%f, %f, %f]", extrinT[0], extrinT[1], extrinT[2]);
         RCLCPP_INFO(this->get_logger(), "publish.path_en: %d", path_en);
         RCLCPP_INFO(this->get_logger(), "publish.scan_publish_en: %d", scan_pub_en);
         RCLCPP_INFO(this->get_logger(), "publish.dense_publish_en: %d", dense_pub_en);
         RCLCPP_INFO(this->get_logger(), "publish.scan_bodyframe_pub_en: %d", scan_body_pub_en);
-        RCLCPP_INFO(this->get_logger(), "pcd_save.pcd_save_en: %d", pcd_save_en);
         RCLCPP_INFO(this->get_logger(), "runtime_pos_log_enable: %d", runtime_pos_log);
         RCLCPP_INFO(this->get_logger(), "===========================");
 
@@ -1005,6 +1153,9 @@ public:
         pubOdomAftMapped_ = this->create_publisher<nav_msgs::msg::Odometry>("odom", rclcpp::SensorDataQoS());
         pubPath_ = this->create_publisher<nav_msgs::msg::Path>("path", 20);
         tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
+        pubOdomMap_ = this->create_publisher<nav_msgs::msg::Odometry>("odom_map", rclcpp::SensorDataQoS());
+        pubPathCorrected_ = this->create_publisher<nav_msgs::msg::Path>("path_corrected", 1);
+        pubCloudMapCorrected_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("cloud_map_corrected", 1);
 
         //------------------------------------------------------------------------------------------------------
         auto period_ms = std::chrono::milliseconds(static_cast<int64_t>(1000.0 / 100.0));
@@ -1013,7 +1164,7 @@ public:
         auto map_period_ms = std::chrono::milliseconds(static_cast<int64_t>(1000.0));
         map_pub_timer_ = rclcpp::create_timer(this, this->get_clock(), map_period_ms, std::bind(&LaserMappingNode::map_publish_callback, this));
 
-        map_save_srv_ = this->create_service<std_srvs::srv::Trigger>("map_save", std::bind(&LaserMappingNode::map_save_callback, this, std::placeholders::_1, std::placeholders::_2));
+        pubShadowMap_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("cloud_shadow_map", 1);
 
         RCLCPP_INFO(this->get_logger(), "Node init finished.");
     }
@@ -1156,6 +1307,9 @@ private:
                         pointBodyToWorld(&(feats_down_body->points[i]), &(feats_down_world->points[i]));
                     }
                     ikdtree.Build(feats_down_world->points);
+                    if (use_shadow_map) {
+                        global_ikdtree.set_downsample_param(filter_size_map_min);
+                    }
                 }
                 return;
             }
@@ -1381,22 +1535,59 @@ private:
     void map_publish_callback()
     {
         if (map_pub_en) publish_map();
+        if (use_shadow_map) publish_shadow_map();
     }
 
-    void map_save_callback(std_srvs::srv::Trigger::Request::ConstSharedPtr req, std_srvs::srv::Trigger::Response::SharedPtr res)
+    /*
+     * trigger_correction(corrected_poses)
+     *
+     * Member wrapper around the free `correct_map()` function. Calls the
+     * core logic (tree rebuild + T_map_odom update) then publishes the
+     * corrected artifacts on `/path_corrected` and `/cloud_map_corrected`.
+     *
+     * This is the entry point plan 3's LC thread will call. Plan 2's unit
+     * tests call the free `correct_map()` directly to bypass publishing.
+     */
+    int trigger_correction(const std::vector<Eigen::Isometry3d>& corrected_poses)
     {
-        RCLCPP_INFO(this->get_logger(), "Saving map to %s...", map_file_path.c_str());
-        if (pcd_save_en)
+        int n = correct_map(corrected_poses);
+        if (n <= 0) return n;
+
+        auto stamp = this->get_clock()->now();
+        publish_path_corrected_(pubPathCorrected_, frame_prefix_ + map_frame_, stamp, corrected_poses);
+
+        PointVector all_points;
         {
-            save_to_pcd();
-            res->success = true;
-            res->message = "Map saved.";
+            std::lock_guard<std::mutex> lock(mtx_global_map);
+            global_ikdtree.flatten(global_ikdtree.Root_Node, all_points, NOT_RECORD);
         }
-        else
+        publish_cloud_corrected_(pubCloudMapCorrected_, frame_prefix_ + map_frame_, stamp, all_points);
+
+        RCLCPP_INFO(this->get_logger(),
+            "correct_map applied: %zu keyframes, %zu shadow points, |t_map_odom|=%.3f m",
+            corrected_poses.size(), all_points.size(), T_map_odom.translation().norm());
+        return n;
+    }
+
+    void publish_shadow_map()
+    {
+        PointVector all_points;
         {
-            res->success = false;
-            res->message = "Map save disabled.";
+            std::lock_guard<std::mutex> lock(mtx_global_map);
+            global_ikdtree.flatten(global_ikdtree.Root_Node, all_points, NOT_RECORD);
         }
+        if (all_points.empty()) return;
+        PointCloudXYZI::Ptr cloud(new PointCloudXYZI());
+        cloud->points.assign(all_points.begin(), all_points.end());
+        cloud->width = cloud->points.size();
+        cloud->height = 1;
+        cloud->is_dense = false;
+
+        sensor_msgs::msg::PointCloud2 msg;
+        pcl::toROSMsg(*cloud, msg);
+        msg.header.frame_id = frame_prefix_ + odom_frame_;
+        msg.header.stamp = this->get_clock()->now();
+        pubShadowMap_->publish(msg);
     }
 
     void imu_cbk(const sensor_msgs::msg::Imu::UniquePtr msg_in)
@@ -1551,6 +1742,43 @@ private:
             tf_broadcaster_->sendTransform(trans);
         }
 
+        if (use_map_correction) {
+            Eigen::Isometry3d T_odom_base = Eigen::Isometry3d::Identity();
+            T_odom_base.linear() = Eigen::Quaterniond(q.w(), q.x(), q.y(), q.z()).toRotationMatrix();
+            T_odom_base.translation() = Eigen::Vector3d(prop_pos(0), prop_pos(1), prop_pos(2));
+            Eigen::Isometry3d T_map_base = T_map_odom * T_odom_base;
+
+            nav_msgs::msg::Odometry odom_map = odom;
+            odom_map.header.frame_id = frame_prefix_ + map_frame_;
+            odom_map.pose.pose.position.x = T_map_base.translation().x();
+            odom_map.pose.pose.position.y = T_map_base.translation().y();
+            odom_map.pose.pose.position.z = T_map_base.translation().z();
+            Eigen::Quaterniond q_map(T_map_base.linear());
+            q_map.normalize();
+            odom_map.pose.pose.orientation.x = q_map.x();
+            odom_map.pose.pose.orientation.y = q_map.y();
+            odom_map.pose.pose.orientation.z = q_map.z();
+            odom_map.pose.pose.orientation.w = q_map.w();
+            pubOdomMap_->publish(odom_map);
+
+            if (tf_pub_en_) {
+                geometry_msgs::msg::TransformStamped tf_map_odom;
+                tf_map_odom.header.frame_id = frame_prefix_ + map_frame_;
+                tf_map_odom.child_frame_id = frame_prefix_ + odom_frame_;
+                tf_map_odom.header.stamp = msg->header.stamp;
+                tf_map_odom.transform.translation.x = T_map_odom.translation().x();
+                tf_map_odom.transform.translation.y = T_map_odom.translation().y();
+                tf_map_odom.transform.translation.z = T_map_odom.translation().z();
+                Eigen::Quaterniond q_mo(T_map_odom.linear());
+                q_mo.normalize();
+                tf_map_odom.transform.rotation.x = q_mo.x();
+                tf_map_odom.transform.rotation.y = q_mo.y();
+                tf_map_odom.transform.rotation.z = q_mo.z();
+                tf_map_odom.transform.rotation.w = q_mo.w();
+                tf_broadcaster_->sendTransform(tf_map_odom);
+            }
+        }
+
         if (path_en && publish_count % 20 == 0) {
             geometry_msgs::msg::PoseStamped pose;
             pose.header.stamp = msg->header.stamp;
@@ -1582,11 +1810,15 @@ private:
     std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
     rclcpp::TimerBase::SharedPtr timer_;
     rclcpp::TimerBase::SharedPtr map_pub_timer_;
-    rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr map_save_srv_;
+    rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubShadowMap_;
+    rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pubOdomMap_;
+    rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pubPathCorrected_;
+    rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubCloudMapCorrected_;
 
     string frame_prefix_;
     string odom_frame_;
     string body_frame_;
+    string map_frame_;
     bool tf_pub_en_ = true;
     double vel_filter_alpha_ = 1.0;
     V3D vel_filtered_ = V3D::Zero();
@@ -1635,18 +1867,6 @@ int main(int argc, char** argv)
 
     if (rclcpp::ok())
         rclcpp::shutdown();
-    /**************** save map ****************/
-    /* 1. make sure you have enough memories
-    /* 2. pcd save will largely influence the real-time performences **/
-    if (pcl_wait_save->size() > 0 && pcd_save_en)
-    {
-        string file_name = string("scans.pcd");
-        string all_points_dir(string(string(ROOT_DIR) + "PCD/") + file_name);
-        pcl::PCDWriter pcd_writer;
-        cout << "current scan saved to /PCD/" << file_name<<endl;
-        pcd_writer.writeBinary(all_points_dir, *pcl_wait_save);
-    }
-
     if (runtime_pos_log)
     {
         vector<double> t, s_vec, s_vec2, s_vec3, s_vec4, s_vec5, s_vec6, s_vec7;

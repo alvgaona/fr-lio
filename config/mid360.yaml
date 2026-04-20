@@ -7,7 +7,6 @@
         filter_size_map: 0.5
         cube_side_length: 100.0
         runtime_pos_log_enable: false
-        map_file_path: "./test.pcd"
 
         common:
             lid_topic:  "/livox/lidar_accumulated"
@@ -34,6 +33,9 @@
             use_scan_to_scan_cov: false  # true: estimate drift covariance from scan-to-scan registration
             use_perpoint_cov: false      # true: per-point Σ from k-NN replaces scalar LASER_POINT_COV (and scalar R_s2s when use_scan_to_scan_cov is on)
             point_range_noise_std: 0.02  # m, sensor range noise (Mid-360 datasheet); used only when use_perpoint_cov is true
+            enable_shadow_map: false     # true: absorb points evicted from the working ikd-Tree into a voxel-deduplicated shadow tree
+            shadow_voxel_size: 0.2       # m, voxel size for shadow-map dedup
+            enable_map_correction: false # true: tag points with source keyframe idx, expose correct_map() for LC-triggered rebuild (requires enable_shadow_map)
             extrinsic_T: [ -0.011, -0.02329, 0.04412 ]
             extrinsic_R: [ 1., 0., 0.,
                             0., 1., 0.,
@@ -47,8 +49,3 @@
             dense_publish_en: false      # false: low down the points number in a global-frame point clouds scan.
             scan_bodyframe_pub_en: false  # true: output the point cloud scans in IMU-body-frame
             vel_filter_alpha: 0.05        # 1.0: no filtering, lower = smoother velocity
-
-        pcd_save:
-            pcd_save_en: false
-            interval: -1                 # how many LiDAR frames saved in each pcd file;
-                                         # -1 : all frames will be saved in ONE pcd file, may lead to memory crash when having too much frames.
