@@ -1721,6 +1721,34 @@ private:
      *  4. (step 7) If max pose delta > threshold, call trigger_correction()
      * Current (step 4): just the candidate search + logging.
      */
+    // Pull the full corrected trajectory from iSAM2 and publish on
+    // /path_corrected. Called after every keyframe (not just after LC
+    // events) so the corrected path grows continuously. Before any LC
+    // fires, corrected_poses mirrors keyframe_poses_orig in the
+    // iSAM2 frame.
+    void publish_corrected_path_from_isam()
+    {
+        std::vector<Eigen::Isometry3d> corrected_poses;
+        {
+            std::lock_guard<std::mutex> lock(mtx_isam);
+            if (!lc_isam) return;
+            gtsam::Values est = lc_isam->calculateEstimate();
+            size_t n = keyframe_poses_orig.size();
+            corrected_poses.reserve(n);
+            for (size_t k = 0; k < n; ++k) {
+                gtsam::Symbol key('x', static_cast<int>(k));
+                if (est.exists(key)) {
+                    corrected_poses.push_back(gtsam_to_iso(est.at<gtsam::Pose3>(key)));
+                } else {
+                    corrected_poses.push_back(keyframe_poses_orig[k]);
+                }
+            }
+        }
+        if (corrected_poses.empty()) return;
+        auto stamp = this->get_clock()->now();
+        publish_path_corrected_(pubPathCorrected_, frame_prefix_ + map_frame_, stamp, corrected_poses);
+    }
+
     void lc_on_keyframe(const LCKeyframe& kf)
     {
         // Build up iSAM2 graph incrementally: on every keyframe, add a prior
@@ -1760,6 +1788,12 @@ private:
             }
             lc_isam->update(graph, values);
         }
+
+        // Publish the current corrected path on every keyframe so rviz has
+        // a continuously-growing trajectory even before the first LC fires.
+        // Before any LC: corrected_poses ≈ keyframe_poses_orig (iSAM2 only
+        // has odom between-factors). After LC: reflects the refinements.
+        publish_corrected_path_from_isam();
 
         auto candidates = lc_keyframe_db.radius_search(
             kf.pose_odom.translation(),
