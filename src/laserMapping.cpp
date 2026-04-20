@@ -211,6 +211,35 @@ double lc_trigger_pos_m   = 0.10;  // m — fire trigger_correction if any keyfr
 double lc_trigger_rot_rad = 0.02;  // rad — fire trigger_correction if any keyframe rotates ≥ this
 std::atomic<bool> lc_correction_in_flight{false};
 
+/* Thesis metrics — aggregated counters + timers. Dumped in one block at
+   shutdown for easy grep/parse. All atomics so the LC thread can update
+   without locking. */
+std::atomic<int> metric_lc_candidates_total{0};
+std::atomic<int> metric_lc_accepted{0};
+std::atomic<int> metric_lc_rejected_fitness{0};
+std::atomic<int> metric_lc_rejected_rel_t{0};
+std::atomic<int> metric_lc_rejected_no_converge{0};
+std::atomic<int> metric_lc_rejected_sanity{0};
+std::atomic<int> metric_corrections_fired{0};
+inline void atomic_add_double(std::atomic<double>& a, double v) {
+    double cur = a.load();
+    while (!a.compare_exchange_weak(cur, cur + v)) {}
+}
+std::atomic<int> metric_no_effective_points{0};
+std::atomic<int> metric_shadow_peak{0};
+std::atomic<long> metric_total_evicted{0};
+std::atomic<long> metric_total_inserted{0};
+std::atomic<double> metric_gicp_total_ms{0.0};
+std::atomic<int> metric_gicp_count{0};
+std::atomic<double> metric_isam_total_ms{0.0};
+std::atomic<int> metric_isam_count{0};
+std::atomic<double> metric_correct_map_total_ms{0.0};
+std::atomic<double> metric_correct_map_max_ms{0.0};
+V3D metric_first_pos = V3D::Zero();
+V3D metric_last_pos  = V3D::Zero();
+bool metric_first_pos_set = false;
+double metric_tmo_final = 0.0;
+
 V3F XAxisPoint_body(LIDAR_SP_LEN, 0.0, 0.0);
 V3F XAxisPoint_world(LIDAR_SP_LEN, 0.0, 0.0);
 V3D euler_cur;
@@ -415,11 +444,18 @@ void points_cache_collect()
             }
         }
     }
+    int shadow_now = global_ikdtree.validnum();
+    metric_total_evicted.fetch_add(static_cast<long>(evicted));
+    metric_total_inserted.fetch_add(static_cast<long>(to_insert.size()));
+    int prev_peak = metric_shadow_peak.load();
+    while (shadow_now > prev_peak &&
+           !metric_shadow_peak.compare_exchange_weak(prev_peak, shadow_now)) {}
+
     static rclcpp::Clock shadow_log_clock(RCL_ROS_TIME);
     RCLCPP_INFO_THROTTLE(rclcpp::get_logger("laser_mapping"), shadow_log_clock, 2000,
         "shadow_map: evicted=%zu inserted=%zu dedup=%zu working=%d shadow=%d",
         evicted, to_insert.size(), evicted - to_insert.size(),
-        ikdtree.validnum(), global_ikdtree.validnum());
+        ikdtree.validnum(), shadow_now);
 }
 
 BoxPointType LocalMap_Points;
@@ -972,6 +1008,7 @@ void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_
     {
         ekfom_data.valid = false;
         std::cerr << "No Effective Points!" << std::endl;
+        metric_no_effective_points.fetch_add(1);
         // ROS_WARN("No Effective Points! \n");
         return;
     }
@@ -1326,6 +1363,40 @@ public:
         fout_out.close();
         fout_pre.close();
         fclose(fp);
+
+        // Thesis metrics — one greppable summary block for log parsing.
+        int gc = metric_gicp_count.load();
+        int ic = metric_isam_count.load();
+        int cf = metric_corrections_fired.load();
+        double gicp_mean = gc > 0 ? metric_gicp_total_ms.load() / gc : 0.0;
+        double isam_mean = ic > 0 ? metric_isam_total_ms.load() / ic : 0.0;
+        double cm_mean = cf > 0 ? metric_correct_map_total_ms.load() / cf : 0.0;
+        V3D travel = metric_last_pos - metric_first_pos;
+        printf("\n==================== METRICS ====================\n");
+        printf("TRAJ first_pos: [%.3f, %.3f, %.3f]\n", metric_first_pos.x(), metric_first_pos.y(), metric_first_pos.z());
+        printf("TRAJ last_pos:  [%.3f, %.3f, %.3f]\n", metric_last_pos.x(), metric_last_pos.y(), metric_last_pos.z());
+        printf("TRAJ net_travel_m: %.3f\n", travel.norm());
+        printf("TRAJ final_t_map_odom_m: %.3f\n", metric_tmo_final);
+        printf("LC candidates_total: %d\n", metric_lc_candidates_total.load());
+        printf("LC accepted: %d\n", metric_lc_accepted.load());
+        printf("LC rejected_no_converge: %d\n", metric_lc_rejected_no_converge.load());
+        printf("LC rejected_fitness: %d\n", metric_lc_rejected_fitness.load());
+        printf("LC rejected_rel_t: %d\n", metric_lc_rejected_rel_t.load());
+        printf("LC rejected_sanity: %d\n", metric_lc_rejected_sanity.load());
+        printf("LC corrections_fired: %d\n", cf);
+        printf("SHADOW peak_points: %d\n", metric_shadow_peak.load());
+        printf("SHADOW total_evicted: %ld\n", metric_total_evicted.load());
+        printf("SHADOW total_inserted: %ld\n", metric_total_inserted.load());
+        double dedup_pct = metric_total_evicted.load() > 0
+            ? 100.0 * (1.0 - (double)metric_total_inserted.load() / metric_total_evicted.load())
+            : 0.0;
+        printf("SHADOW dedup_pct: %.1f\n", dedup_pct);
+        printf("FILTER no_effective_points_events: %d\n", metric_no_effective_points.load());
+        printf("TIMING gicp_count: %d mean_ms: %.2f\n", gc, gicp_mean);
+        printf("TIMING isam_count: %d mean_ms: %.2f\n", ic, isam_mean);
+        printf("TIMING correct_map_count: %d mean_ms: %.2f max_ms: %.2f\n",
+               cf, cm_mean, metric_correct_map_max_ms.load());
+        printf("==================================================\n\n");
     }
 
     rclcpp::CallbackGroup::SharedPtr get_imu_callback_group() { return imu_cb_group_; }
@@ -1819,6 +1890,7 @@ private:
         Eigen::Isometry3d T_guess = cand.pose_odom.inverse() * kf.pose_odom;
         Eigen::Matrix4f init_guess = T_guess.matrix().cast<float>();
 
+        metric_lc_candidates_total.fetch_add(1);
         pcl::GeneralizedIterativeClosestPoint<PointType, PointType> gicp;
         gicp.setInputSource(kf.scan_downsampled);
         gicp.setInputTarget(cand.scan_downsampled);
@@ -1826,15 +1898,21 @@ private:
         gicp.setMaximumIterations(lc_icp_max_iter);
         gicp.setTransformationEpsilon(1e-6);
         PointCloudXYZI aligned;
+        double t_gicp_start = omp_get_wtime();
         gicp.align(aligned, init_guess);
+        double t_gicp_ms = (omp_get_wtime() - t_gicp_start) * 1000.0;
+        atomic_add_double(metric_gicp_total_ms, t_gicp_ms);
+        metric_gicp_count.fetch_add(1);
 
         if (!gicp.hasConverged()) {
+            metric_lc_rejected_no_converge.fetch_add(1);
             RCLCPP_INFO(this->get_logger(),
                 "lc: GICP no-converge kf=%d<-%d", kf.source_idx, best_candidate);
             return;
         }
         double fitness = gicp.getFitnessScore();
         if (fitness > lc_icp_fitness_thresh) {
+            metric_lc_rejected_fitness.fetch_add(1);
             RCLCPP_INFO(this->get_logger(),
                 "lc: GICP rejected kf=%d<-%d fitness=%.4f > thresh=%.4f",
                 kf.source_idx, best_candidate, fitness, lc_icp_fitness_thresh);
@@ -1849,12 +1927,14 @@ private:
         // the same physical region. A well-behaved LC with true revisit has
         // |t_rel| ~ drift magnitude (<< 1m typically). Reject anything larger.
         if (t_rel.norm() > lc_max_rel_t_m) {
+            metric_lc_rejected_rel_t.fetch_add(1);
             RCLCPP_INFO(this->get_logger(),
                 "lc: rejected kf=%d<-%d |t_rel|=%.3f > max_rel_t=%.3f (likely perceptual aliasing)",
                 kf.source_idx, best_candidate, t_rel.norm(), lc_max_rel_t_m);
             return;
         }
 
+        metric_lc_accepted.fetch_add(1);
         RCLCPP_INFO(this->get_logger(),
             "lc: GICP accepted kf=%d<-%d fitness=%.4f |t_rel|=%.3f",
             kf.source_idx, best_candidate, fitness, t_rel.norm());
@@ -1874,11 +1954,15 @@ private:
             gtsam::Symbol key_cur('x', kf.source_idx);
             lc_graph.add(gtsam::BetweenFactor<gtsam::Pose3>(
                 key_cand, key_cur, iso_to_gtsam(T_cand_cur), lc_noise));
+            double t_isam_start = omp_get_wtime();
             lc_isam->update(lc_graph, gtsam::Values());
             // Extra relinearization steps help iSAM2 propagate the LC impact
             // through the full tree rather than just one tree hop.
             lc_isam->update();
             lc_isam->update();
+            double t_isam_ms = (omp_get_wtime() - t_isam_start) * 1000.0;
+            atomic_add_double(metric_isam_total_ms, t_isam_ms);
+            metric_isam_count.fetch_add(1);
         }
 
         // Pull the corrected trajectory out of iSAM2 and decide whether to
@@ -1938,6 +2022,7 @@ private:
         // false positive: max_dpos >> |t_rel|. Threshold conservatively at 3x.
         if (max_dpos > 3.0 * static_cast<double>(t_rel.norm())
             && max_dpos > 1.0) {
+            metric_lc_rejected_sanity.fetch_add(1);
             RCLCPP_WARN(this->get_logger(),
                 "lc: rejecting correction — max_dpos=%.3f >> 3*|t_rel|=%.3f (likely false LC)",
                 max_dpos, 3.0 * t_rel.norm());
@@ -1945,8 +2030,16 @@ private:
         }
 
         lc_correction_in_flight.store(true);
+        double t_correct_start = omp_get_wtime();
         int n_corrected = trigger_correction(corrected_poses);
+        double t_correct_ms = (omp_get_wtime() - t_correct_start) * 1000.0;
         lc_correction_in_flight.store(false);
+        atomic_add_double(metric_correct_map_total_ms, t_correct_ms);
+        double prev_max = metric_correct_map_max_ms.load();
+        while (t_correct_ms > prev_max &&
+               !metric_correct_map_max_ms.compare_exchange_weak(prev_max, t_correct_ms)) {}
+        metric_corrections_fired.fetch_add(1);
+        metric_tmo_final = T_map_odom.translation().norm();
         RCLCPP_INFO(this->get_logger(),
             "lc: trigger_correction returned %d (shadow points)", n_corrected);
     }
@@ -2129,6 +2222,11 @@ private:
         odom.twist.twist.angular.z = omega_filtered_(2);
 
         pubOdomAftMapped_->publish(odom);
+        if (!metric_first_pos_set) {
+            metric_first_pos = V3D(prop_pos(0), prop_pos(1), prop_pos(2));
+            metric_first_pos_set = true;
+        }
+        metric_last_pos = V3D(prop_pos(0), prop_pos(1), prop_pos(2));
 
         if (tf_pub_en_) {
             geometry_msgs::msg::TransformStamped trans;
