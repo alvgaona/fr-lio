@@ -124,7 +124,14 @@ inline int correct_map_core(
         tree.Build(all_points);
     }
 
-    T_map_odom_out = corrected_poses.back() * keyframe_poses_orig_inout.back().inverse();
+    // Across multiple LC events, T_map_odom must accumulate. Each call to
+    // correct_map_core applies an INCREMENTAL delta to the shadow tree (its
+    // points were already in the previous map frame). The cumulative
+    // transform from live odom to the current map frame is the product of
+    // all incremental deltas, not the latest delta alone.
+    Eigen::Isometry3d incremental_delta =
+        corrected_poses.back() * keyframe_poses_orig_inout.back().inverse();
+    T_map_odom_out = T_map_odom_out * incremental_delta;
     keyframe_poses_orig_inout = corrected_poses;
 
     return static_cast<int>(all_points.size());
