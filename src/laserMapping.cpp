@@ -209,6 +209,9 @@ double lc_lc_pos_sigma   = 0.15;  // m — fixed LC-edge trans noise (wider than
 double lc_lc_rot_sigma   = 0.05;  // rad — fixed LC-edge rot noise
 double lc_trigger_pos_m   = 0.10;  // m — fire trigger_correction if any keyframe moves ≥ this
 double lc_trigger_rot_rad = 0.02;  // rad — fire trigger_correction if any keyframe rotates ≥ this
+bool   lc_use_crlb_edges = false;  // true → derive LC edge noise from CRLB (accumulated P_drift between keyframes), else fixed sigmas
+double lc_crlb_edge_min_sigma_pos = 0.02;  // m, floor on CRLB-derived edge position sigma
+double lc_crlb_edge_min_sigma_rot = 0.005; // rad, floor on CRLB-derived edge rotation sigma
 std::atomic<bool> lc_correction_in_flight{false};
 
 /* Thesis metrics — aggregated counters + timers. Dumped in one block at
@@ -847,6 +850,10 @@ void map_incremental()
                 kf.timestamp = lidar_end_time;
                 kf.pose_odom = T_odom_base;
                 kf.scan_downsampled = PointCloudXYZI::Ptr(new PointCloudXYZI(*feats_down_body));
+                // CRLB snapshot: accumulated scan-to-scan drift cov at this
+                // moment. Used only when use_scan_to_scan_cov AND
+                // lc.use_crlb_edges are both enabled; otherwise zero.
+                kf.p_drift_snapshot = P_drift;
                 LCKeyframe kf_for_worker = kf;
                 lc_keyframe_db.add(std::move(kf));
                 lc_worker.enqueue(std::move(kf_for_worker));
@@ -1147,6 +1154,9 @@ public:
         this->declare_parameter<double>("lc.lc_rot_sigma", 0.05);
         this->declare_parameter<double>("lc.trigger_pos_m", 0.10);
         this->declare_parameter<double>("lc.trigger_rot_rad", 0.02);
+        this->declare_parameter<bool>("lc.use_crlb_edges", false);
+        this->declare_parameter<double>("lc.crlb_edge_min_sigma_pos", 0.02);
+        this->declare_parameter<double>("lc.crlb_edge_min_sigma_rot", 0.005);
         this->declare_parameter<vector<double>>("mapping.extrinsic_T", vector<double>());
         this->declare_parameter<vector<double>>("mapping.extrinsic_R", vector<double>());
 
@@ -1211,6 +1221,9 @@ public:
         this->get_parameter_or<double>("lc.lc_rot_sigma", lc_lc_rot_sigma, 0.05);
         this->get_parameter_or<double>("lc.trigger_pos_m", lc_trigger_pos_m, 0.10);
         this->get_parameter_or<double>("lc.trigger_rot_rad", lc_trigger_rot_rad, 0.02);
+        this->get_parameter_or<bool>("lc.use_crlb_edges", lc_use_crlb_edges, false);
+        this->get_parameter_or<double>("lc.crlb_edge_min_sigma_pos", lc_crlb_edge_min_sigma_pos, 0.02);
+        this->get_parameter_or<double>("lc.crlb_edge_min_sigma_rot", lc_crlb_edge_min_sigma_rot, 0.005);
         if (lc_enable && !use_map_correction) {
             RCLCPP_WARN(this->get_logger(),
                 "lc.enable=true requires mapping.enable_map_correction=true; forcing it on");
@@ -1976,9 +1989,39 @@ private:
             std::lock_guard<std::mutex> lock(mtx_isam);
             if (!lc_isam) return;  // shouldn't happen — graph was initialized above
             gtsam::NonlinearFactorGraph lc_graph;
-            auto lc_noise = gtsam::noiseModel::Diagonal::Sigmas(
-                (gtsam::Vector(6) << lc_lc_rot_sigma, lc_lc_rot_sigma, lc_lc_rot_sigma,
-                                      lc_lc_pos_sigma, lc_lc_pos_sigma, lc_lc_pos_sigma).finished());
+
+            // Edge noise: either fixed sigmas (default) or derived from the
+            // CRLB drift covariance accumulated between the two keyframes.
+            // The CRLB route captures per-point Σ (via scan-to-scan FIM
+            // composition of per-point k-NN variances) and sensor range
+            // noise — the same unified per-point Σ that weights the IESKF
+            // measurement update (Contribution 1.5).
+            gtsam::SharedNoiseModel lc_noise;
+            if (lc_use_crlb_edges && use_scan_to_scan_cov) {
+                // Accumulated drift between the two visits. P_drift is
+                // monotonically accumulated per scan into snapshots; the
+                // diff approximates the drift that occurred BETWEEN kf_cand
+                // and kf_cur. GTSAM Pose3 noise order is (rot, trans).
+                // P_drift is stored in (pos, rot) block order per
+                // laserMapping.cpp, so swap blocks when converting.
+                Eigen::Matrix<double, 6, 6> dP =
+                    kf.p_drift_snapshot - cand.p_drift_snapshot;
+                Eigen::Vector3d pos_var = dP.block<3,3>(0,0).diagonal().cwiseMax(0.0);
+                Eigen::Vector3d rot_var = dP.block<3,3>(3,3).diagonal().cwiseMax(0.0);
+                Eigen::Vector3d pos_sigma = pos_var.array().sqrt().max(lc_crlb_edge_min_sigma_pos);
+                Eigen::Vector3d rot_sigma = rot_var.array().sqrt().max(lc_crlb_edge_min_sigma_rot);
+                gtsam::Vector6 sig;
+                sig << rot_sigma, pos_sigma;  // GTSAM Pose3 convention: (rot, trans)
+                lc_noise = gtsam::noiseModel::Diagonal::Sigmas(sig);
+                RCLCPP_INFO(this->get_logger(),
+                    "lc: CRLB edge sigma pos=[%.3f %.3f %.3f] rot=[%.3f %.3f %.3f]",
+                    pos_sigma.x(), pos_sigma.y(), pos_sigma.z(),
+                    rot_sigma.x(), rot_sigma.y(), rot_sigma.z());
+            } else {
+                lc_noise = gtsam::noiseModel::Diagonal::Sigmas(
+                    (gtsam::Vector(6) << lc_lc_rot_sigma, lc_lc_rot_sigma, lc_lc_rot_sigma,
+                                          lc_lc_pos_sigma, lc_lc_pos_sigma, lc_lc_pos_sigma).finished());
+            }
             gtsam::Symbol key_cand('x', cand.source_idx);
             gtsam::Symbol key_cur('x', kf.source_idx);
             lc_graph.add(gtsam::BetweenFactor<gtsam::Pose3>(

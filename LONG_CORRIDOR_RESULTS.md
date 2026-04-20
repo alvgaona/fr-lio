@@ -17,7 +17,8 @@ FAST-LIO2 at the cube size for which it was designed.
 | **B′** (+per-point Σ + Huber, native cube) | 300 | **0.14%** | 0.145 | +0.05 m | ✓ |
 | A (baseline, bounded cube) | 50 | 2.87% | 3.074 | −2.85 m | ✓ |
 | B (+per-point Σ + Huber, bounded cube) | 50 | 2.72% | 2.849 | −2.20 m | ✓ |
-| C (full SLAM stack, bounded cube) | 50 | **1.29%** | 1.330 | **+0.08 m** | ✓ |
+| C (full SLAM, fixed LC edges) | 50 | **1.29%** | 1.330 | **+0.08 m** | ✓ |
+| **D** (full SLAM + CRLB LC edges) | 50 | **1.31%** | 1.405 | **+0.18 m** | ✓ |
 
 **Key insight:** the contribution of our SLAM stack is NOT to beat FAST-LIO2
 at its optimal operating point — it is to extend the operating envelope
@@ -218,6 +219,79 @@ blocks on LC work. Dropped keyframe count was 0 across all runs.
 | Plan 3. Real-time LC + iSAM2 PGO | 8 candidates, 6 accepted, 3 rejected by sanity gate, 3 corrections fired |
 | Real-time compliance | All operations < 25 ms mean, well below 10 Hz budget |
 
+## Detailed results — Config D (full SLAM + CRLB LC edges)
+
+Same as Config C, with two knobs flipped:
+- `use_scan_to_scan_cov: true` (populate `P_drift` snapshot per keyframe)
+- `lc.use_crlb_edges: true` (derive iSAM2 LC edge noise from the
+  accumulated drift covariance between keyframes, instead of the fixed
+  `lc.lc_pos_sigma` / `lc.lc_rot_sigma` hand-tuned constants)
+
+```
+TRAJ first_pos:          [0.059, 0.003, 0.015]
+TRAJ last_pos_odom:      [-1.414, 1.150, -1.261]
+TRAJ last_pos_map:       [-1.167, -0.665, 0.175]
+TRAJ drift_odom_m:       2.262
+TRAJ drift_map_m:        1.405
+TRAJ path_length_m:      107.081
+TRAJ drift_pct_odom:     2.11
+TRAJ drift_pct_map:      1.31
+TRAJ final_t_map_odom_m: 2.257
+
+LC candidates_total:     8      # identical to C
+LC accepted:             6
+LC rejected_fitness:     2
+LC rejected_sanity:      3
+LC corrections_fired:    3
+
+SHADOW peak_points:      65182  # essentially same as C
+
+TIMING gicp_count:       8   mean_ms: 25.28
+TIMING isam_count:       6   mean_ms: 2.55    # 2.3× higher than C (denser noise matrix)
+TIMING correct_map_count: 3  mean_ms: 13.41   max_ms: 13.75
+```
+
+### Config C vs Config D — the key comparison
+
+| Metric | C (fixed LC edges) | D (CRLB LC edges) | Interpretation |
+|---|---|---|---|
+| drift_pct_map | **1.29%** | **1.31%** | **Within noise** — CRLB does not beat fixed |
+| drift_map_m | 1.330 | 1.405 | +0.075 m (marginal regression) |
+| Z endpoint (map) | +0.08 m | +0.18 m | both floor-level, fine |
+| LC accepts / rejects | 6 / 2 + 3 | 6 / 2 + 3 | identical detection behavior |
+| corrections_fired | 3 | 3 | identical |
+| final_t_map_odom_m | 2.210 | 2.257 | similar absolute correction |
+| iSAM2 mean_ms | 1.10 | 2.55 | **2.3× higher** (denser noise model) |
+
+### What this confirms — the thesis/paper's core claim
+
+Python sim already showed CRLB-weighted LC edges do not beat hand-tuned
+fixed weights for ATE (documented in `posegraph_crlb_demo.md`). This
+real-data run **replicates that finding on the C++ corridor bag**:
+
+- Drift is statistically indistinguishable (1.29% vs 1.31%, within run
+  variance)
+- iSAM2 cost is 2.3× higher with CRLB edges
+- No other metric meaningfully changes
+
+**This is the critical thesis framing**:
+
+> "The published scan-to-scan CRLB provides honest, principled, no-
+> per-deployment-tuning drift uncertainty for downstream consumers
+> (flight controllers, multi-sensor fusion, multi-session edge weights).
+> But using the same CRLB to weight internal pose-graph optimization
+> edges does not improve trajectory accuracy over hand-tuned fixed
+> weights — a negative result replicated on both Python sim and real
+> data. We interpret this as: calibrated covariance is valuable for
+> *communicating uncertainty*, not for *choosing optimization weights*,
+> a classical observation in robust estimation now documented
+> empirically for the LIO case."
+
+This closes a reviewer-common objection ("if your CRLB is so great,
+why doesn't it improve ATE?") with real data rather than hand-waving.
+
+---
+
 ## What the A′ row changes in the thesis narrative
 
 Including the A′ reference forces an honest framing:
@@ -311,7 +385,7 @@ lc:
   enable: false
 ```
 
-**Config C (full SLAM):**
+**Config C (full SLAM, fixed LC edges):**
 ```yaml
 mapping:
   use_perpoint_cov: true
@@ -319,9 +393,27 @@ mapping:
   huber_k: 3.0
   enable_shadow_map: true
   enable_map_correction: true
+  use_scan_to_scan_cov: false
 lc:
   enable: true
+  use_crlb_edges: false
   # (all other lc.* params at defaults)
+```
+
+**Config D (full SLAM + CRLB-weighted LC edges):**
+```yaml
+mapping:
+  use_perpoint_cov: true
+  point_range_noise_std: 0.05
+  huber_k: 3.0
+  enable_shadow_map: true
+  enable_map_correction: true
+  use_scan_to_scan_cov: true        # populate P_drift snapshots
+lc:
+  enable: true
+  use_crlb_edges: true              # derive LC edge noise from P_drift diff
+  crlb_edge_min_sigma_pos: 0.02
+  crlb_edge_min_sigma_rot: 0.005
 ```
 
 Common across A/B/C: `cube_side_length: 50.0`, `det_range: 30.0`.
