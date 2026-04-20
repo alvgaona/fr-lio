@@ -61,6 +61,86 @@ this is the engineering baseline the rest of the thesis builds on.
 
 ---
 
+## Contribution 1.5: Scan-to-Scan CRLB for Real-Time Drift Covariance
+
+**This is the genuinely novel algorithmic contribution of the thesis.**
+
+### Problem
+
+LIO systems need to publish how uncertain their pose is. Existing approaches
+all have limitations:
+
+- **FAST-LIO2**: filter's own P matrix is overconfident by ~5 orders of
+  magnitude (NEES ≈ 400k on a 100-scan run, established in our analysis).
+  This is fundamental: per-edge independent-noise IESKF assumption doesn't
+  reflect temporally correlated bias drift.
+- **LIO-SAM**: uses scan-matching fitness as LC edge covariance. Heuristic,
+  scene-dependent, requires per-deployment tuning.
+- **UA-LIO (2025)**: per-point Σ in registration, but does not propagate
+  to drift uncertainty.
+- **LOG-LIO2, iG-LIO**: per-point / per-voxel Σ, no drift covariance.
+
+### Our contribution
+
+A **real-time, analytical, per-scan Cramér-Rao Lower Bound** on the
+scan-to-scan point-to-plane registration problem:
+
+```
+FIM = Σ_i  (1 / R_i) · J_iᵀ J_i
+P_rel = inv(FIM)     # CRLB
+```
+
+where:
+- `R_i = σ_range² + n_iᵀ Σ_p_i n_i` (the per-point Σ from k-NN, unified
+  with Contribution 2's IESKF measurement weighting)
+- `J_i` is the 6-DoF Jacobian of the point-to-plane residual with respect
+  to the relative pose
+- `P_rel` is the per-scan relative-pose covariance, accumulated into
+  `P_drift` published alongside the filter state
+
+### Why this is novel
+
+Three things differentiate this from prior work:
+
+1. **Scan-to-scan, not scan-to-map** — scan-to-map CRLBs are degenerate
+   because map error accumulates; scan-to-scan has clean observability
+   per edge.
+2. **Analytical, not empirical** — derived from Fisher Information, no
+   Monte Carlo, no environment-specific tuning.
+3. **Unified per-point Σ** — the same k-NN covariance feeds both the
+   IESKF measurement R and the CRLB. One principle, two cost terms.
+   No other LIO system does this unification.
+
+### What this enables
+
+- **Flight-safe autonomy**: a drone making 100 Hz decisions between LC
+  events gets honest per-step drift σ, not overconfident filter P.
+- **Multi-sensor fusion**: GPS/visual integration uses calibrated LiDAR
+  covariance without per-deployment re-tuning.
+- **Factor-graph SLAM edge weights**: principled BetweenFactor noise
+  derivable from sensor specs alone.
+
+### Validation
+
+- Python sim: `P_drift` NEES consistency ≈ 12 (position) / 3 (rotation)
+  with bias-walk floor, vs. raw filter NEES ≈ 400k.
+- C++ port: integrated into `compute_scan_to_scan_covariance` in
+  `laserMapping.cpp`, gated by `use_scan_to_scan_cov`; tested on rosbag.
+
+### Honest caveats (for the thesis)
+
+- **CRLB is a LOWER BOUND** on achievable covariance, not an estimator.
+  Published σ can be optimistic by 2-4× in severe drift due to map-aging
+  effects not captured in the sensor-noise-only CRLB. Documented as a
+  limitation; the contribution is that it's principled and
+  no-per-deployment-tuning, not that it's exact.
+- **CRLB-weighted LC edges do not beat hand-tuned fixed weights for ATE**
+  (our Python ablation). The published covariance is for DOWNSTREAM
+  consumers, not for internal optimization weights. The thesis frames it
+  this way explicitly.
+
+---
+
 ## Contribution 2: Per-Point Σ + Huber Kernel for Bounded-Regime Robustness
 
 Replaces FAST-LIO2's hand-tuned scalar `LASER_POINT_COV` with a data-driven
@@ -345,11 +425,12 @@ step that precedes the C++ production port.
 
 ## One-sentence contribution statement
 
-> This thesis extends the FAST-LIO2 family to the memory-bounded,
-> correctable-map, multi-session SLAM regime by combining principled
-> per-point uncertainty weighting, a voxel-deduplicated shadow global
-> map with source-pose-tagged corrections, and real-time loop closure
-> via GTSAM iSAM2 — validated on real data with a 55% drift reduction
-> in the bounded-cube regime, full real-time compliance, and honest
-> characterization of remaining failure modes in geometrically
-> degenerate environments.
+> This thesis introduces a **real-time scan-to-scan CRLB drift covariance
+> with unified per-point Σ** — the first analytical, no-per-deployment-
+> tuning honest uncertainty for LIO drift — and extends the FAST-LIO2
+> family to memory-bounded, correctable-map, multi-session SLAM with a
+> voxel-deduplicated shadow global map, source-pose-tagged corrections,
+> and real-time loop closure via GTSAM iSAM2. Validated on real data
+> with a 55% drift reduction in the bounded-cube regime, full real-time
+> compliance, and honest characterization of remaining failure modes in
+> geometrically degenerate environments.
