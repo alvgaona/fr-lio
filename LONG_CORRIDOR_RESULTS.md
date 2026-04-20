@@ -14,6 +14,7 @@ FAST-LIO2 at the cube size for which it was designed.
 | Config | Cube | drift_pct_map | drift_map_m | Z drift | Completion |
 |---|---|---|---|---|---|
 | **A′** (stock FAST-LIO2, native cube) | 300 | **0.12%** | 0.124 | +0.04 m | ✓ |
+| **B′** (+per-point Σ + Huber, native cube) | 300 | **0.14%** | 0.145 | +0.05 m | ✓ |
 | A (baseline, bounded cube) | 50 | 2.87% | 3.074 | −2.85 m | ✓ |
 | B (+per-point Σ + Huber, bounded cube) | 50 | 2.72% | 2.849 | −2.20 m | ✓ |
 | C (full SLAM stack, bounded cube) | 50 | **1.29%** | 1.330 | **+0.08 m** | ✓ |
@@ -60,6 +61,34 @@ Observations:
   evictions would kick in and drift would accumulate with no recovery.
 - This is the "you do not need our work" reference: short trajectory,
   sufficient memory, no revisit/multi-session requirement.
+
+## Detailed results — Config B′ (per-point Σ + Huber, cube=300)
+
+`use_perpoint_cov: true, point_range_noise_std: 0.05, huber_k: 3.0`,
+cube=300. Shadow and LC off.
+
+```
+TRAJ first_pos:          [0.001, -0.012, -0.005]
+TRAJ last_pos_odom:      [-0.070, -0.127, 0.045]
+TRAJ last_pos_map:       [-0.070, -0.127, 0.045]
+TRAJ drift_odom_m:       0.145
+TRAJ drift_map_m:        0.145
+TRAJ path_length_m:      104.880
+TRAJ drift_pct_odom:     0.14
+TRAJ drift_pct_map:      0.14
+FILTER no_effective_points_events: 0
+```
+
+Observations:
+- **Per-point Σ + Huber delivers no improvement** in the well-fed regime
+  (0.14% vs A′'s 0.12% — within run-to-run noise).
+- The marginal degradation (0.02%) is consistent with the 5 cm noise
+  floor being slightly *less confident* than baseline `LASER_POINT_COV`
+  on perfectly-planar returns, which dominates in the large-cube regime.
+- **Contribution 2 is a robustness mechanism for marginal regimes**
+  (small cube, degenerate geometry, map-drift-at-revisit), not a free
+  upgrade. At cube=50 (Configs A→B) it gives +5% drift reduction and
+  Z-axis improvement; at cube=300 (A′→B′) it gives none.
 
 ## Detailed results — Config A (baseline, bounded cube)
 
@@ -240,6 +269,20 @@ cube_side_length: 300.0
 mapping:
   det_range: 30.0
   use_perpoint_cov: false
+  enable_shadow_map: false
+  enable_map_correction: false
+lc:
+  enable: false
+```
+
+**Config B′ (+per-point Σ + Huber at native cube):**
+```yaml
+cube_side_length: 300.0
+mapping:
+  det_range: 30.0
+  use_perpoint_cov: true
+  point_range_noise_std: 0.05
+  huber_k: 3.0
   enable_shadow_map: false
   enable_map_correction: false
 lc:
