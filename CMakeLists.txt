@@ -80,6 +80,16 @@ set(dependencies
 # Thirdparty libraries
 find_package(Eigen3 REQUIRED)
 find_package(PCL REQUIRED COMPONENTS common io)
+find_package(TBB REQUIRED)
+find_package(GTSAM REQUIRED)
+# GTSAM's exported CMake target may add a bare -ltbb that the macOS/conda
+# toolchain can't resolve without an explicit link directory. Add the pixi
+# env's lib dir so `-ltbb` finds libtbb.dylib.
+get_target_property(_TBB_LIB_PATH TBB::tbb LOCATION)
+if(_TBB_LIB_PATH)
+  get_filename_component(_TBB_LIB_DIR ${_TBB_LIB_PATH} DIRECTORY)
+  link_directories(${_TBB_LIB_DIR})
+endif()
 
 message(Eigen: ${EIGEN3_INCLUDE_DIR})
 message(STATUS "PCL: ${PCL_INCLUDE_DIRS}")
@@ -99,7 +109,7 @@ target_include_directories(fastlio_mapping PUBLIC
   $<INSTALL_INTERFACE:include>
   ${PCL_INCLUDE_DIRS}
 )
-target_link_libraries(fastlio_mapping ${PCL_LIBRARIES} ${PYTHON_LIBRARIES} Eigen3::Eigen)
+target_link_libraries(fastlio_mapping ${PCL_LIBRARIES} ${PYTHON_LIBRARIES} Eigen3::Eigen gtsam TBB::tbb)
 target_include_directories(fastlio_mapping PRIVATE ${PYTHON_INCLUDE_DIRS})
 
 list(APPEND EOL_LIST "foxy" "galactic" "eloquent" "dashing" "crystal")
