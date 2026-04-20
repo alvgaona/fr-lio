@@ -8,16 +8,60 @@
 
 ## Summary — headline numbers
 
-| Config | drift_pct_map | drift_map_m | Z drift | Completion |
-|---|---|---|---|---|
-| A (baseline FAST-LIO2) | **2.87%** | 3.074 | −2.85 m | ✓ |
-| B (+per-point Σ + Huber) | **2.72%** | 2.849 | −2.20 m | ✓ |
-| C (full SLAM stack) | **1.29%** | 1.330 | **+0.08 m** | ✓ |
+Four configurations on the same bag. A' is included as a reference: stock
+FAST-LIO2 at the cube size for which it was designed.
 
-**Full-stack improvement over baseline:** −55% drift as % of path length.
-**Z axis recovery:** from −2.85 m (impossible, sensor in ground) to +0.08 m (plausible, floor level).
+| Config | Cube | drift_pct_map | drift_map_m | Z drift | Completion |
+|---|---|---|---|---|---|
+| **A′** (stock FAST-LIO2, native cube) | 300 | **0.12%** | 0.124 | +0.04 m | ✓ |
+| A (baseline, bounded cube) | 50 | 2.87% | 3.074 | −2.85 m | ✓ |
+| B (+per-point Σ + Huber, bounded cube) | 50 | 2.72% | 2.849 | −2.20 m | ✓ |
+| C (full SLAM stack, bounded cube) | 50 | **1.29%** | 1.330 | **+0.08 m** | ✓ |
 
-## Detailed results — Config A (baseline)
+**Key insight:** the contribution of our SLAM stack is NOT to beat FAST-LIO2
+at its optimal operating point — it is to extend the operating envelope
+into regimes where the stock cube-fits-everything assumption breaks.
+
+### Regime-by-regime positioning
+
+| When cube can fit environment (short bag, unlimited memory) | Stock FAST-LIO2 (A′) | 0.12% drift |
+| When cube must be bounded (long flight, memory-limited Jetson) | Our full stack (C) | 1.29% drift |
+| Need correctable, globally-consistent, multi-session map | **Only our stack delivers this** | Independent of cube |
+
+Within the small-cube regime:
+- **A → B: −5% drift** (per-point Σ + Huber, Contribution 2)
+- **A → C: −55% drift** (full-stack vs baseline, Contributions 2+5+6 + plan 3)
+- **Z-axis recovery: from −2.85 m (unphysical) to +0.08 m** (floor level) via LC
+
+## Detailed results — Config A′ (stock FAST-LIO2, cube=300)
+
+Reference point: FAST-LIO2 with its default-large cube, no new features.
+The entire ~104 m traversal fits inside the cube → no eviction, full map
+context available for every scan → filter stays tight.
+
+```
+TRAJ first_pos:          [0.006, -0.012, -0.004]
+TRAJ last_pos_odom:      [-0.029, -0.123, 0.040]
+TRAJ last_pos_map:       [-0.029, -0.123, 0.040]
+TRAJ drift_odom_m:       0.124
+TRAJ drift_map_m:        0.124
+TRAJ path_length_m:      104.606
+TRAJ drift_pct_odom:     0.12
+TRAJ drift_pct_map:      0.12
+TRAJ final_t_map_odom_m: 0.000
+FILTER no_effective_points_events: 0
+```
+
+Observations:
+- 0.12% drift is essentially at the noise floor — this bag is not a
+  stress test for FAST-LIO2 when given its preferred cube size.
+- **But:** no shadow map, no correctable global frame, no LC — if the
+  trajectory were longer than cube half-width (150 m from start),
+  evictions would kick in and drift would accumulate with no recovery.
+- This is the "you do not need our work" reference: short trajectory,
+  sufficient memory, no revisit/multi-session requirement.
+
+## Detailed results — Config A (baseline, bounded cube)
 
 All new features disabled: stock FAST-LIO2 with scalar `LASER_POINT_COV`,
 no shadow map, no map correction, no LC.
@@ -145,6 +189,33 @@ blocks on LC work. Dropped keyframe count was 0 across all runs.
 | Plan 3. Real-time LC + iSAM2 PGO | 8 candidates, 6 accepted, 3 rejected by sanity gate, 3 corrections fired |
 | Real-time compliance | All operations < 25 ms mean, well below 10 Hz budget |
 
+## What the A′ row changes in the thesis narrative
+
+Including the A′ reference forces an honest framing:
+
+1. **FAST-LIO2 at native cube is already excellent** on this bag (0.12% drift).
+   Our contributions do NOT beat it in absolute numbers.
+2. **The contribution is about regime, not absolute performance**:
+   - Small cubes (bounded memory, long flights): our stack is essential
+     (A → C is −55% drift improvement within the small-cube regime)
+   - Globally-consistent correctable maps: only our stack delivers this,
+     regardless of cube size
+   - Multi-session / re-localize / post-flight drift-sensitive mapping:
+     stock FAST-LIO2 cannot; our shadow + source-pose correction can
+3. **For UAV flight on Jetson at 200 Hz IMU rate** (the deployment target):
+   the cube=300 regime is often memory- or latency-prohibitive, so
+   cube=50 is the realistic operating point. Our stack turns that
+   operating point from "2.87% drift, no correctable map" into
+   "1.29% drift with globally-consistent map".
+
+Thesis claim re-statement:
+
+> "Our contributions extend the operating envelope of FAST-LIO-family
+> systems into memory-bounded and globally-consistent regimes: in the
+> bounded-cube regime where naive FAST-LIO2 suffers ~3% drift, our
+> full stack recovers most of the drift (to ~1.3%) and additionally
+> produces a globally-corrected shadow map, at real-time cost."
+
 ## Known limitations (for thesis limitations section)
 
 - **Corridor-axis observability:** no geometric sensor can fix pure
@@ -162,6 +233,18 @@ blocks on LC work. Dropped keyframe count was 0 across all runs.
 ## Reproducibility
 
 Config files: `config/fast_lio.yaml` with the following knobs:
+
+**Config A′ (stock FAST-LIO2, native cube):**
+```yaml
+cube_side_length: 300.0
+mapping:
+  det_range: 30.0
+  use_perpoint_cov: false
+  enable_shadow_map: false
+  enable_map_correction: false
+lc:
+  enable: false
+```
 
 **Config A (baseline):**
 ```yaml
@@ -198,7 +281,8 @@ lc:
   # (all other lc.* params at defaults)
 ```
 
-Common across all: `cube_side_length: 50.0`, `det_range: 30.0`.
+Common across A/B/C: `cube_side_length: 50.0`, `det_range: 30.0`.
+A′ uses `cube_side_length: 300.0` as the stock FAST-LIO2 reference.
 
 Binary: branch `feat/correct-map` at commit `90cc24f` or later.
 
