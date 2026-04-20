@@ -124,14 +124,15 @@ inline int correct_map_core(
         tree.Build(all_points);
     }
 
-    // Across multiple LC events, T_map_odom must accumulate. Each call to
-    // correct_map_core applies an INCREMENTAL delta to the shadow tree (its
-    // points were already in the previous map frame). The cumulative
-    // transform from live odom to the current map frame is the product of
-    // all incremental deltas, not the latest delta alone.
-    Eigen::Isometry3d incremental_delta =
-        corrected_poses.back() * keyframe_poses_orig_inout.back().inverse();
-    T_map_odom_out = T_map_odom_out * incremental_delta;
+    // T_map_odom is the transform that takes the filter's current (live
+    // odom-frame) pose to the corrected map-frame pose. Assuming the LAST
+    // entry in keyframe_poses_orig_inout is the fresh odom pose of the
+    // keyframe that triggered this correction, this is an absolute
+    // transform — replace, don't multiply. Correct multi-LC behavior
+    // requires that shadow-map points are kept in the CURRENT map frame
+    // between corrections (done by pre-transforming evictions through
+    // T_map_odom in points_cache_collect — see laserMapping.cpp).
+    T_map_odom_out = corrected_poses.back() * keyframe_poses_orig_inout.back().inverse();
     keyframe_poses_orig_inout = corrected_poses;
 
     return static_cast<int>(all_points.size());
