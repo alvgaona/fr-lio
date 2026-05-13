@@ -121,6 +121,13 @@ double point_range_noise_var = 0.0004;
 
 mutex mtx_buffer;
 condition_variable sig_buffer;
+/* Working ikd-Tree mutex. Only acquired from the LC thread when
+   correct_working_tree is enabled — the IESKF hot path (h_share_model,
+   incremental insert) does NOT lock it, matching upstream FAST-LIO2's
+   single-threaded assumption. Concurrent rebuild from LC thread can race
+   with hot-path Nearest_Search → filter divergence is possible. The
+   correct_working_tree flag must therefore stay off for flight. */
+mutex mtx_ikdtree;
 
 string root_dir = ROOT_DIR;
 string lid_topic, imu_topic;
@@ -175,6 +182,13 @@ double shadow_voxel_size = 0.2;
    shadow tree is rebuilt by transforming each point by the Δ of its source
    keyframe. Gated by mapping.enable_map_correction. */
 bool use_map_correction = false;
+/* When true, applies per-source Δ to the live working ikd-Tree at LC time
+   (in addition to the shadow tree). Required to see deformed geometry in
+   small / no-eviction scenarios where the shadow tree stays empty. Costs a
+   working-tree rebuild on the LC thread under mtx_ikdtree — blocks
+   h_share_model for the duration of the rebuild, so flight-unsafe with
+   large working trees. Default off. */
+bool correct_working_tree = false;
 int cur_source_idx = 0;
 std::vector<Eigen::Isometry3d> keyframe_poses_orig;
 Eigen::Isometry3d T_map_odom = Eigen::Isometry3d::Identity();
@@ -238,6 +252,10 @@ std::atomic<double> metric_isam_total_ms{0.0};
 std::atomic<int> metric_isam_count{0};
 std::atomic<double> metric_correct_map_total_ms{0.0};
 std::atomic<double> metric_correct_map_max_ms{0.0};
+std::atomic<double> metric_correct_working_tree_total_ms{0.0};
+std::atomic<double> metric_correct_working_tree_max_ms{0.0};
+std::atomic<int> metric_correct_working_tree_count{0};
+std::atomic<int> metric_correct_working_tree_points_total{0};
 V3D metric_first_pos = V3D::Zero();
 V3D metric_last_pos  = V3D::Zero();
 V3D metric_prev_pos  = V3D::Zero();
@@ -414,20 +432,65 @@ void publish_cloud_corrected_(rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::
 int correct_map(const std::vector<Eigen::Isometry3d>& corrected_poses)
 {
     if (!use_map_correction) return -1;
-    std::lock_guard<std::mutex> lock(mtx_global_map);
-    return correct_map_core(
-        corrected_poses,
-        keyframe_poses_orig,
-        global_ikdtree,
-        global_voxel_set,
-        shadow_voxel_size,
-        T_map_odom);
+
+    std::vector<Eigen::Isometry3d> orig_snapshot;
+    int n_shadow = 0;
+    {
+        std::lock_guard<std::mutex> lock(mtx_global_map);
+        // Snapshot orig keyframe poses BEFORE correct_map_core mutates
+        // them, so the same deltas can be reused on the working tree.
+        orig_snapshot = keyframe_poses_orig;
+        n_shadow = correct_map_core(
+            corrected_poses,
+            keyframe_poses_orig,
+            global_ikdtree,
+            global_voxel_set,
+            shadow_voxel_size,
+            T_map_odom);
+    }
+
+    int n_working = 0;
+    if (correct_working_tree && n_shadow >= 0
+        && corrected_poses.size() == orig_snapshot.size()
+        && !corrected_poses.empty()) {
+        // Same per-source-Δ operation as the shadow tree, applied to the
+        // live working ikd-Tree. Required to deform live geometry in
+        // small / no-eviction scenarios where the shadow tree stays empty.
+        // Holds mtx_ikdtree for the full flatten + rebuild — blocks
+        // h_share_model. Costs ~50–200 ms depending on tree size.
+        auto deltas = compute_keyframe_deltas(corrected_poses, orig_snapshot);
+        double t_start = omp_get_wtime();
+        {
+            std::lock_guard<std::mutex> lock(mtx_ikdtree);
+            PointVector live_points;
+            ikdtree.flatten(ikdtree.Root_Node, live_points, NOT_RECORD);
+            n_working = transform_points_by_source_delta(live_points, deltas);
+            if (!live_points.empty()) {
+                ikdtree.Build(live_points);
+            }
+        }
+        double t_ms = (omp_get_wtime() - t_start) * 1000.0;
+        atomic_add_double(metric_correct_working_tree_total_ms, t_ms);
+        double prev_max = metric_correct_working_tree_max_ms.load();
+        while (t_ms > prev_max
+               && !metric_correct_working_tree_max_ms.compare_exchange_weak(prev_max, t_ms)) {}
+        metric_correct_working_tree_count.fetch_add(1);
+        metric_correct_working_tree_points_total.fetch_add(n_working);
+        RCLCPP_INFO(rclcpp::get_logger("laser_mapping"),
+            "correct_working_tree: %d points transformed, rebuild took %.1f ms",
+            n_working, t_ms);
+    }
+
+    return std::max(n_shadow, n_working);
 }
 
 void points_cache_collect()
 {
     PointVector points_history;
-    ikdtree.acquire_removed_points(points_history);
+    {
+        std::lock_guard<std::mutex> lock(mtx_ikdtree);
+        ikdtree.acquire_removed_points(points_history);
+    }
     if (!use_shadow_map || points_history.empty()) return;
 
     // Pre-transform evictions to the current map frame so the shadow tree
@@ -533,7 +596,10 @@ void lasermap_fov_segment()
 
     points_cache_collect();
     double delete_begin = omp_get_wtime();
-    if(cub_needrm.size() > 0) kdtree_delete_counter = ikdtree.Delete_Point_Boxes(cub_needrm);
+    if (cub_needrm.size() > 0) {
+        std::lock_guard<std::mutex> lock(mtx_ikdtree);
+        kdtree_delete_counter = ikdtree.Delete_Point_Boxes(cub_needrm);
+    }
     kdtree_delete_time = omp_get_wtime() - delete_begin;
 }
 
@@ -911,8 +977,11 @@ void map_incremental()
     }
 
     double st_time = omp_get_wtime();
-    add_point_size = ikdtree.Add_Points(PointToAdd, true);
-    ikdtree.Add_Points(PointNoNeedDownsample, false);
+    {
+        std::lock_guard<std::mutex> lock(mtx_ikdtree);
+        add_point_size = ikdtree.Add_Points(PointToAdd, true);
+        ikdtree.Add_Points(PointNoNeedDownsample, false);
+    }
     add_point_size = PointToAdd.size() + PointNoNeedDownsample.size();
     kdtree_incremental_time = omp_get_wtime() - st_time;
 }
@@ -935,6 +1004,11 @@ void set_posestamp(T & out)
 
 void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_data)
 {
+    // Held for the full per-scan matching. Serializes against any LC-thread
+    // rebuild of the working ikd-Tree (correct_working_tree path). Acquired
+    // once at function entry so the OMP parallel Nearest_Search loop below
+    // doesn't pay per-point lock overhead.
+    std::lock_guard<std::mutex> lock(mtx_ikdtree);
     double match_start = omp_get_wtime();
     laserCloudOri->clear();
     corr_normvect->clear();
@@ -1105,6 +1179,7 @@ public:
         this->declare_parameter<bool>("publish.scan_publish_en", true);
         this->declare_parameter<bool>("publish.dense_publish_en", true);
         this->declare_parameter<bool>("publish.scan_bodyframe_pub_en", true);
+        this->declare_parameter<bool>("publish.unfiltered_odom_en", false);
         this->declare_parameter<int>("max_iteration", 4);
         this->declare_parameter<string>("common.lid_topic", "/livox/lidar");
         this->declare_parameter<string>("common.imu_topic", "/livox/imu");
@@ -1136,6 +1211,7 @@ public:
         this->declare_parameter<bool>("mapping.enable_shadow_map", false);
         this->declare_parameter<double>("mapping.shadow_voxel_size", 0.2);
         this->declare_parameter<bool>("mapping.enable_map_correction", false);
+        this->declare_parameter<bool>("mapping.correct_working_tree", false);
         this->declare_parameter<string>("map_frame", "map");
         this->declare_parameter<bool>("lc.enable", false);
         this->declare_parameter<int>("lc.keyframe_every_scans", 5);
@@ -1171,6 +1247,7 @@ public:
         this->get_parameter_or<bool>("publish.scan_publish_en", scan_pub_en, true);
         this->get_parameter_or<bool>("publish.dense_publish_en", dense_pub_en, true);
         this->get_parameter_or<bool>("publish.scan_bodyframe_pub_en", scan_body_pub_en, true);
+        this->get_parameter_or<bool>("publish.unfiltered_odom_en", unfiltered_odom_en_, false);
         this->get_parameter_or<int>("max_iteration", NUM_MAX_ITERATIONS, 4);
         this->get_parameter_or<string>("common.lid_topic", lid_topic, "/livox/lidar");
         this->get_parameter_or<string>("common.imu_topic", imu_topic,"/livox/imu");
@@ -1203,6 +1280,7 @@ public:
         this->get_parameter_or<bool>("mapping.enable_shadow_map", use_shadow_map, false);
         this->get_parameter_or<double>("mapping.shadow_voxel_size", shadow_voxel_size, 0.2);
         this->get_parameter_or<bool>("mapping.enable_map_correction", use_map_correction, false);
+        this->get_parameter_or<bool>("mapping.correct_working_tree", correct_working_tree, false);
         this->get_parameter_or<string>("map_frame", map_frame_, "map");
         this->get_parameter_or<bool>("lc.enable", lc_enable, false);
         this->get_parameter_or<int>("lc.keyframe_every_scans", lc_keyframe_every_scans, 5);
@@ -1268,6 +1346,7 @@ public:
         RCLCPP_INFO(this->get_logger(), "mapping.enable_shadow_map: %d", use_shadow_map);
         RCLCPP_INFO(this->get_logger(), "mapping.shadow_voxel_size: %f", shadow_voxel_size);
         RCLCPP_INFO(this->get_logger(), "mapping.enable_map_correction: %d", use_map_correction);
+        RCLCPP_INFO(this->get_logger(), "mapping.correct_working_tree: %d", correct_working_tree);
         RCLCPP_INFO(this->get_logger(), "map_frame: %s", map_frame_.c_str());
         RCLCPP_INFO(this->get_logger(), "lc.enable: %d", lc_enable);
         RCLCPP_INFO(this->get_logger(), "lc.keyframe_every_scans: %d", lc_keyframe_every_scans);
@@ -1354,6 +1433,9 @@ public:
         pubLaserCloudEffect_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("cloud_effected", 20);
         pubLaserCloudMap_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("Laser_map", 20);
         pubOdomAftMapped_ = this->create_publisher<nav_msgs::msg::Odometry>("odom", rclcpp::SensorDataQoS());
+        if (unfiltered_odom_en_) {
+            pubOdomUnfiltered_ = this->create_publisher<nav_msgs::msg::Odometry>("odom_unfiltered", rclcpp::SensorDataQoS());
+        }
         pubPath_ = this->create_publisher<nav_msgs::msg::Path>("path", 20);
         tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
         pubOdomMap_ = this->create_publisher<nav_msgs::msg::Odometry>("odom_map", rclcpp::SensorDataQoS());
@@ -1438,6 +1520,26 @@ public:
         printf("TIMING isam_count: %d mean_ms: %.2f\n", ic, isam_mean);
         printf("TIMING correct_map_count: %d mean_ms: %.2f max_ms: %.2f\n",
                cf, cm_mean, metric_correct_map_max_ms.load());
+        int wtc = metric_correct_working_tree_count.load();
+        double wt_mean = wtc > 0
+            ? metric_correct_working_tree_total_ms.load() / wtc : 0.0;
+        double wt_pts_mean = wtc > 0
+            ? static_cast<double>(metric_correct_working_tree_points_total.load()) / wtc
+            : 0.0;
+        printf("TIMING correct_working_tree_count: %d mean_ms: %.2f max_ms: %.2f mean_points: %.0f\n",
+               wtc, wt_mean, metric_correct_working_tree_max_ms.load(), wt_pts_mean);
+        // Final scan-to-scan drift covariance (only meaningful when
+        // use_scan_to_scan_cov=true). Traces of the 3x3 position and
+        // rotation blocks of P_drift, plus the corresponding sqrt(.) for
+        // direct comparison against the trajectory drift_*_m metrics
+        // above.
+        double pdp_trace = P_drift.block<3,3>(0,0).trace();
+        double pdr_trace = P_drift.block<3,3>(3,3).trace();
+        printf("S2S P_drift_pos_trace_m2: %.6f\n", pdp_trace);
+        printf("S2S P_drift_rot_trace_rad2: %.6f\n", pdr_trace);
+        printf("S2S sqrt_P_drift_pos_m: %.4f\n", sqrt(pdp_trace));
+        printf("S2S sqrt_P_drift_rot_deg: %.4f\n", sqrt(pdr_trace) * 180.0 / M_PI);
+        printf("S2S P_filter_pos_trace_m2: %.6f\n", kf.get_P().block<3,3>(0,0).trace());
         printf("==================================================\n\n");
     }
 
@@ -2079,6 +2181,15 @@ private:
             Eigen::AngleAxisd aa(d.linear());
             max_drot = std::max(max_drot, std::abs(aa.angle()));
         }
+        // One-line gate summary for log analysis. Captures every value the
+        // sanity gates check so post-hoc tuning works from one grep.
+        double rel_rot_angle = Eigen::AngleAxisd(T_cand_cur.linear()).angle();
+        RCLCPP_INFO(this->get_logger(),
+            "lc: gate_summary max_dpos=%.3f m max_drot=%.4f rad "
+            "|t_rel|=%.3f m |R_rel|=%.4f rad",
+            max_dpos, max_drot,
+            static_cast<double>(t_rel.norm()), rel_rot_angle);
+
         RCLCPP_INFO(this->get_logger(),
             "lc: PGO update max_dpos=%.3f m, max_drot=%.4f rad (thresh: %.3f / %.4f)",
             max_dpos, max_drot, lc_trigger_pos_m, lc_trigger_rot_rad);
@@ -2092,12 +2203,36 @@ private:
         // rest of the graph — likely a false positive that slipped past the
         // per-correspondence gates. A true revisit: max_dpos ≈ |t_rel|;
         // false positive: max_dpos >> |t_rel|. Threshold conservatively at 3x.
+        //
+        // Absolute floor (was 1.0 m): bumped to 5.0 m on 2026-05-04 after
+        // observing that late-LC scenarios (significant drift accumulated
+        // between matched keyframes) legitimately produce max_dpos in the
+        // 1–2 m range while |t_rel| stays small — the 3× rule alone would
+        // over-reject these. Egregious false LCs observed empirically
+        // produce max_dpos in the 15–25 m range (campus bag), so 5.0 m
+        // still defends against the pathological cases.
         if (max_dpos > 3.0 * static_cast<double>(t_rel.norm())
-            && max_dpos > 1.0) {
+            && max_dpos > 5.0) {
             metric_lc_rejected_sanity.fetch_add(1);
             RCLCPP_WARN(this->get_logger(),
                 "lc: rejecting correction — max_dpos=%.3f >> 3*|t_rel|=%.3f (likely false LC)",
                 max_dpos, 3.0 * t_rel.norm());
+            return;
+        }
+
+        // Rotation sanity gate: symmetric to the position gate above. In a
+        // grid-corridor environment GICP can converge with reasonable fitness
+        // and small |t_rel| while snapping into a wrong yaw basin (90°/180°
+        // aliasing). Translation looks fine; the rotation is what's wrong.
+        // Reject when PGO wants to rotate keyframes by much more than the
+        // GICP-reported relative rotation. Floor at ~30° (0.5 rad) so small
+        // legitimate rotational corrections aren't blocked.
+        if (max_drot > 3.0 * rel_rot_angle && max_drot > 0.5) {
+            metric_lc_rejected_sanity.fetch_add(1);
+            RCLCPP_WARN(this->get_logger(),
+                "lc: rejecting correction — max_drot=%.4f rad >> 3*|R_rel|=%.4f rad "
+                "(likely yaw-flip aliasing)",
+                max_drot, 3.0 * rel_rot_angle);
             return;
         }
 
@@ -2113,7 +2248,8 @@ private:
         metric_corrections_fired.fetch_add(1);
         metric_tmo_final = T_map_odom.translation().norm();
         RCLCPP_INFO(this->get_logger(),
-            "lc: trigger_correction returned %d (shadow points)", n_corrected);
+            "lc: trigger_correction returned %d (corrected points; shadow + working tree)",
+            n_corrected);
     }
 
     int trigger_correction(const std::vector<Eigen::Isometry3d>& corrected_poses)
@@ -2128,6 +2264,16 @@ private:
         {
             std::lock_guard<std::mutex> lock(mtx_global_map);
             global_ikdtree.flatten(global_ikdtree.Root_Node, all_points, NOT_RECORD);
+        }
+        // When the working-tree correction is on, the live ikd-Tree holds the
+        // authoritative deformed geometry — especially in no-eviction
+        // scenarios where the shadow tree stays empty. Append its contents so
+        // /cloud_map_corrected shows everything that got transformed.
+        if (correct_working_tree) {
+            std::lock_guard<std::mutex> lock(mtx_ikdtree);
+            PointVector live;
+            ikdtree.flatten(ikdtree.Root_Node, live, NOT_RECORD);
+            all_points.insert(all_points.end(), live.begin(), live.end());
         }
         publish_cloud_corrected_(pubCloudMapCorrected_, frame_prefix_ + map_frame_, stamp, all_points);
 
@@ -2294,6 +2440,23 @@ private:
         odom.twist.twist.angular.z = omega_filtered_(2);
 
         pubOdomAftMapped_->publish(odom);
+
+        if (unfiltered_odom_en_ && pubOdomUnfiltered_->get_subscription_count() > 0) {
+            nav_msgs::msg::Odometry odom_raw = odom;
+            Eigen::Quaterniond q_raw(prop_rot);
+            q_raw.normalize();
+            odom_raw.pose.pose.orientation.x = q_raw.x();
+            odom_raw.pose.pose.orientation.y = q_raw.y();
+            odom_raw.pose.pose.orientation.z = q_raw.z();
+            odom_raw.pose.pose.orientation.w = q_raw.w();
+            odom_raw.twist.twist.linear.x = vel_body(0);
+            odom_raw.twist.twist.linear.y = vel_body(1);
+            odom_raw.twist.twist.linear.z = vel_body(2);
+            odom_raw.twist.twist.angular.x = omega(0);
+            odom_raw.twist.twist.angular.y = omega(1);
+            odom_raw.twist.twist.angular.z = omega(2);
+            pubOdomUnfiltered_->publish(odom_raw);
+        }
         V3D cur_pos(prop_pos(0), prop_pos(1), prop_pos(2));
         if (!metric_first_pos_set) {
             metric_first_pos = cur_pos;
@@ -2379,6 +2542,7 @@ private:
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubLaserCloudEffect_;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubLaserCloudMap_;
     rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pubOdomAftMapped_;
+    rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pubOdomUnfiltered_;
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pubPath_;
     rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr sub_imu_;
     rclcpp::CallbackGroup::SharedPtr imu_cb_group_;
@@ -2398,6 +2562,7 @@ private:
     string body_frame_;
     string map_frame_;
     bool tf_pub_en_ = true;
+    bool unfiltered_odom_en_ = false;
     double vel_filter_alpha_ = 1.0;
     V3D vel_filtered_ = V3D::Zero();
     V3D omega_filtered_ = V3D::Zero();
