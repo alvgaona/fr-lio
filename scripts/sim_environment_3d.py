@@ -59,6 +59,15 @@ elif ENVIRONMENT == "square_corridor":
     ROOM_Y = 10.0
     ROOM_Z = 3.0
     SENSOR_POS = np.array([5.0, 1.0, 1.5])
+elif ENVIRONMENT == "corridor_grid":
+    # 30x30x3 m floor with a 2x2 grid of solid blocks at the quadrants,
+    # forming 3 horizontal + 3 vertical corridors and 9 intersections.
+    # Block centers at (8, 8), (8, 22), (22, 8), (22, 22), each 10x10x3 m.
+    # Outer corridors are 3 m wide, central horizontal/vertical 4 m wide.
+    ROOM_X = 30.0
+    ROOM_Y = 30.0
+    ROOM_Z = 3.0
+    SENSOR_POS = np.array([15.0, 1.5, 1.5])
 else:
     # Default: cube room (also used by the "hover" environment since hover
     # only differs in the trajectory, not the geometry).
@@ -237,6 +246,16 @@ elif ENVIRONMENT == "square_corridor":
          (-INNER_HALF, INNER_HALF, -Z_HALF, Z_HALF)),
     ]
     OBSTACLES = []
+elif ENVIRONMENT == "corridor_grid":
+    PLANES = make_room_planes(ROOM_X, ROOM_Y, ROOM_Z)
+    OBSTACLES = [
+        {"center": (8.0,  8.0,  ROOM_Z / 2), "size": (10.0, 10.0, ROOM_Z)},
+        {"center": (8.0,  22.0, ROOM_Z / 2), "size": (10.0, 10.0, ROOM_Z)},
+        {"center": (22.0, 8.0,  ROOM_Z / 2), "size": (10.0, 10.0, ROOM_Z)},
+        {"center": (22.0, 22.0, ROOM_Z / 2), "size": (10.0, 10.0, ROOM_Z)},
+    ]
+    for obs in OBSTACLES:
+        PLANES.extend(make_box_planes(obs["center"], obs["size"]))
 else:
     PLANES = make_room_planes(ROOM_X, ROOM_Y, ROOM_Z)
 

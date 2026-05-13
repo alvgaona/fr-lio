@@ -38,10 +38,82 @@ SQ_STRAIGHT_LEN = 2.0 * (SQ_HALF - SQ_CORNER_R)
 SQ_ARC_LEN = 0.5 * np.pi * SQ_CORNER_R
 SQ_PERIM = 4.0 * SQ_STRAIGHT_LEN + 4.0 * SQ_ARC_LEN
 
+# Closed walk through the 2x2-block corridor grid that visits every corridor
+# segment at least once. 16 waypoints, 90° rounded corners.
+CG_CORNER_R = 1.0
+CG_CENTER = np.array([15.0, 15.0, 1.5])
+CG_SPEED = 1.8
+CG_N_LAPS = 1
+CG_Z_HEIGHT = 1.5
+CG_WAYPOINTS = np.array([
+    [1.5,  1.5 ], [15.0, 1.5 ], [28.5, 1.5 ], [28.5, 15.0], [15.0, 15.0],
+    [1.5,  15.0], [1.5,  28.5], [15.0, 28.5], [28.5, 28.5], [28.5, 15.0],
+    [28.5, 1.5 ], [15.0, 1.5 ], [15.0, 15.0], [15.0, 28.5], [1.5,  28.5],
+    [1.5,  1.5 ],
+])
+
+
+def _build_cg_segments(waypoints, r):
+    """Build a list of (straight | arc) primitives from a closed waypoint list.
+
+    Returns (segs, total_perimeter). Each entry has 's0' (cumulative arc
+    length at start) and 'len'. Straights carry 'start' and 'u'; arcs carry
+    'center', 'ang0', 'dir', 'r', 'u_out'.
+    """
+    n = len(waypoints) - 1
+    edges = []
+    for i in range(n):
+        d = waypoints[i + 1] - waypoints[i]
+        L = float(np.linalg.norm(d))
+        edges.append({"start": waypoints[i].astype(float).copy(),
+                      "end":   waypoints[i + 1].astype(float).copy(),
+                      "len":   L,
+                      "u":     d / L})
+
+    trim_start = [0.0] * n
+    trim_end = [0.0] * n
+    for i in range(n):
+        u_in = edges[i]["u"]
+        u_out = edges[(i + 1) % n]["u"]
+        if abs(u_in[0] * u_out[1] - u_in[1] * u_out[0]) > 1e-9:
+            trim_end[i] = r
+            trim_start[(i + 1) % n] = r
+
+    segs = []
+    s = 0.0
+    for i in range(n):
+        straight_len = edges[i]["len"] - trim_start[i] - trim_end[i]
+        if straight_len > 1e-9:
+            seg_start = edges[i]["start"] + edges[i]["u"] * trim_start[i]
+            segs.append({"type": "straight", "s0": s, "len": straight_len,
+                         "start": seg_start, "u": edges[i]["u"]})
+            s += straight_len
+        if trim_end[i] > 0:
+            u_in = edges[i]["u"]
+            u_out = edges[(i + 1) % n]["u"]
+            arc_start = edges[i]["end"] - u_in * trim_end[i]
+            cross = u_in[0] * u_out[1] - u_in[1] * u_out[0]
+            sign = 1 if cross > 0 else -1
+            n_perp = np.array([-u_in[1], u_in[0]]) * sign
+            center = arc_start + n_perp * r
+            v0 = arc_start - center
+            ang0 = float(np.arctan2(v0[1], v0[0]))
+            arc_len = 0.5 * np.pi * r
+            segs.append({"type": "arc", "s0": s, "len": arc_len,
+                         "center": center, "ang0": ang0, "dir": sign,
+                         "r": r, "u_out": u_out})
+            s += arc_len
+    return segs, s
+
+
+CG_SEGMENTS, CG_PERIM = _build_cg_segments(CG_WAYPOINTS, CG_CORNER_R)
+
 if ENVIRONMENT == "long_corridor":
     DURATION = 50.0
 elif ENVIRONMENT == "square_corridor":
     DURATION = SQ_PERIM * SQ_N_LAPS / SQ_SPEED
+elif ENVIRONMENT == "corridor_grid":
+    DURATION = CG_PERIM * CG_N_LAPS / CG_SPEED
 elif ENVIRONMENT == "room_corridor":
     DURATION = 60.0
 elif ENVIRONMENT == "cube":
@@ -112,6 +184,8 @@ elif ENVIRONMENT == "long_corridor":
     LONG_CORRIDOR_SPEED = 2.0
     TRAJ_Z_AMP = 0.1
     TRAJ_Z_FREQ = 2 * np.pi / 7.0
+elif ENVIRONMENT == "corridor_grid":
+    TRAJ_CENTER = CG_CENTER
 else:
     TRAJ_CENTER = np.array([5.0, 5.0, 1.5])
     TRAJ_RADIUS = 2.5
@@ -321,6 +395,51 @@ def trajectory_at(t):
         p = np.array([x, y, z])
         v = np.array([vx, vy, vz])
         a_world = np.array([ax, ay, az])
+        omega_world = np.array([0.0, 0.0, wz])
+        return R, p, v, omega_world, a_world
+
+    if ENVIRONMENT == "corridor_grid":
+        speed = CG_SPEED
+        s = (t * speed) % CG_PERIM
+        seg = CG_SEGMENTS[0]
+        for cand in CG_SEGMENTS:
+            if s < cand["s0"] + cand["len"] + 1e-12:
+                seg = cand
+                break
+        s_loc = s - seg["s0"]
+
+        if seg["type"] == "straight":
+            u = seg["u"]
+            p_xy = seg["start"] + u * s_loc
+            v_xy = u * speed
+            a_xy = np.zeros(2)
+            yaw = float(np.arctan2(u[1], u[0]))
+            wz = 0.0
+        else:
+            theta = seg["ang0"] + seg["dir"] * s_loc / seg["r"]
+            cs, sn = np.cos(theta), np.sin(theta)
+            p_xy = seg["center"] + seg["r"] * np.array([cs, sn])
+            tan = seg["dir"] * np.array([-sn, cs])
+            v_xy = tan * speed
+            a_xy = -(speed * speed / seg["r"]) * np.array([cs, sn])
+            yaw = float(np.arctan2(tan[1], tan[0]))
+            wz = seg["dir"] * speed / seg["r"]
+
+        z_amp = 0.15
+        z_freq = 2 * np.pi / 5.0
+        z = CG_Z_HEIGHT + z_amp * np.sin(z_freq * t)
+        vz = z_amp * z_freq * np.cos(z_freq * t)
+        az = -z_amp * z_freq * z_freq * np.sin(z_freq * t)
+
+        cy_yaw, sy_yaw = np.cos(yaw), np.sin(yaw)
+        R = np.array([
+            [cy_yaw, -sy_yaw, 0.0],
+            [sy_yaw, cy_yaw, 0.0],
+            [0.0, 0.0, 1.0],
+        ])
+        p = np.array([p_xy[0], p_xy[1], z])
+        v = np.array([v_xy[0], v_xy[1], vz])
+        a_world = np.array([a_xy[0], a_xy[1], az])
         omega_world = np.array([0.0, 0.0, wz])
         return R, p, v, omega_world, a_world
 
