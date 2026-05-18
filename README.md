@@ -1,5 +1,9 @@
 # Flight-ready Drift-Aware LiDAR-Intertial Odometry and Mapping with Self-correcting Maps
 
+<p align="center">
+  <img src="assets/img/IMG_2033.jpg" alt="Flight platform with labelled hardware components" />
+</p>
+
 [![Watch the demo][youtube-badge]][youtube-video]
 
 > [!NOTE]
