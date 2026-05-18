@@ -29,7 +29,7 @@ def generate_launch_description():
         'use_sim_time', default_value='false',
         description='Use simulation (Gazebo) clock if true'
     )
-    default_config_file = os.path.join(default_config_path, 'mid360.yaml')
+    default_config_file = os.path.join(default_config_path, 'indoors.yaml')
     declare_config_file_cmd = DeclareLaunchArgument(
         'config_file', default_value=default_config_file,
         description='Config file path (absolute or relative)'

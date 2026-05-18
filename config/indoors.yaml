@@ -1,0 +1,70 @@
+/**:
+  ros__parameters:
+    body_frame: "base_link"
+    feature_extract_enable: false
+    point_filter_num: 2
+    max_iteration: 1
+    filter_size_surf: 0.05
+    filter_size_map: 0.1
+    cube_side_length: 100.0
+    runtime_pos_log_enable: false
+    common:
+      lid_topic: "/livox/lidar_accumulated"
+      imu_topic: "/livox/imu"
+      time_sync_en: false
+      time_offset_lidar_to_imu: 0.0
+    preprocess:
+      lidar_type: 1
+      scan_line: 4
+      blind: 0.3
+      timestamp_unit: 3
+      scan_rate: 10
+    mapping:
+      acc_cov: 0.1
+      gyr_cov: 0.1
+      b_acc_cov: 0.0001
+      b_gyr_cov: 0.0001
+      fov_degree: 360.0
+      det_range: 15.0
+      extrinsic_est_en: true
+      use_scan_to_scan_cov: false  # Config D: enable CRLB P_drift computation for LC edge noise
+      use_perpoint_cov: false      # thesis Contribution 2: per-point Σ from k-NN
+      point_range_noise_std: 0.05 # m, range noise floor; used only when use_perpoint_cov is true
+      huber_k: 3.0                # Huber cap on |r|/√R_i (3=3σ, 1.5=aggressive downweight, 5=nearly-off)
+      enable_shadow_map: true     # true: absorb points evicted from the working ikd-Tree into a voxel-deduplicated shadow tree
+      shadow_voxel_size: 0.2      # m, voxel size for shadow-map dedup
+      enable_map_correction: true # true: tag points with source keyframe idx, expose trigger_correction() for LC-driven rebuild
+      correct_working_tree: true  # also apply per-source Δ to the live ikd-Tree at LC time. Required for visible map deformation in no-eviction (large cube) scenarios. RACES with the IESKF hot path → flight-unsafe; bagfile / offline use only.
+      extrinsic_T: [-0.011, -0.02329, 0.04412]
+      extrinsic_R: [1., 0., 0., 0., 1., 0., 0., 0., 1.]
+    lc:
+      enable: true                 # true: real-time LC detection + iSAM2 PGO + map correction
+      keyframe_every_scans: 5      # form a keyframe every N scans (at 10 Hz → every 0.5 s)
+      keyframe_min_dist: 0.5       # m, OR form a keyframe after this much motion since the last
+      max_queue_size: 32           # LC worker queue depth before drop-oldest
+      radius: 3.0                  # m, candidate-search radius around current keyframe
+      min_time_gap: 30.0           # s, minimum age gap for a keyframe to be an LC candidate
+      min_spacing: 30.0             # s, minimum time between accepted LC events
+      icp_max_dist: 1.0            # m, GICP max correspondence distance
+      icp_fitness_thresh: 0.5      # GICP fitness gate (smaller = stricter); 0.1 too tight for dungeon returns
+      icp_max_iter: 30
+      max_rel_t_m: 2.0             # m, reject LC if GICP's refined translation exceeds this (guards against perceptual aliasing)
+      odom_pos_sigma: 0.1         # m, iSAM2 odom-edge translational sigma
+      odom_rot_sigma: 0.05         # rad, iSAM2 odom-edge rotational sigma
+      lc_pos_sigma: 0.15           # m, iSAM2 LC-edge translational sigma (wider than odom) — used when use_crlb_edges=false
+      lc_rot_sigma: 0.05           # rad, iSAM2 LC-edge rotational sigma — used when use_crlb_edges=false
+      use_crlb_edges: true         # Config D: derive LC edge noise from accumulated P_drift (needs use_scan_to_scan_cov=true)
+      crlb_edge_min_sigma_pos: 0.02  # m, floor on CRLB-derived edge position sigma
+      crlb_edge_min_sigma_rot: 0.005 # rad, floor on CRLB-derived edge rotation sigma
+      trigger_pos_m: 0.10          # m, fire correction if any keyframe moves ≥ this
+      trigger_rot_rad: 0.02        # rad, fire correction if any keyframe rotates ≥ this
+    publish:
+      path_en: true
+      effect_map_en: false
+      map_en: true
+      scan_publish_en: true
+      dense_publish_en: false
+      scan_bodyframe_pub_en: false
+      tf_en: true
+      vel_filter_alpha: 0.1
+      unfiltered_odom_en: true  # publish /odom_unfiltered (raw v_b, prop_rot, omega) for filter validation

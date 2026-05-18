@@ -1,0 +1,83 @@
+/**:
+  ros__parameters:
+    body_frame: "base_link"
+    feature_extract_enable: false
+    point_filter_num: 2            # same as outdoors.yaml
+    max_iteration: 3
+    filter_size_surf: 0.30
+    filter_size_map: 0.50
+
+    # Same cube/det_range as outdoors.yaml so the comparison is clean.
+    # Whatever drift this baseline produces is purely from FAST-LIO2's
+    # standard pipeline, in the bounded-cube regime that exposes it.
+    cube_side_length: 10.0
+    runtime_pos_log_enable: false
+
+    common:
+      lid_topic: "/livox/lidar_accumulated"
+      imu_topic: "/livox/imu"
+      time_sync_en: false
+      time_offset_lidar_to_imu: 0.0
+
+    preprocess:
+      lidar_type: 1
+      scan_line: 4
+      blind: 0.5
+      timestamp_unit: 3
+      scan_rate: 10
+
+    mapping:
+      acc_cov: 0.1
+      gyr_cov: 0.1
+      b_acc_cov: 0.0001
+      b_gyr_cov: 0.0001
+      fov_degree: 360.0
+      det_range: 5.0
+
+      extrinsic_est_en: true
+
+      # ---- ALL THESIS FEATURES OFF (Config A baseline) ----
+      use_scan_to_scan_cov: false   # no CRLB drift covariance
+      use_perpoint_cov: false       # scalar LASER_POINT_COV (FAST-LIO2 default)
+      point_range_noise_std: 0.05   # ignored when use_perpoint_cov=false
+      huber_k: 3.0                  # ignored when use_perpoint_cov=false
+      enable_shadow_map: false      # no shadow tree
+      shadow_voxel_size: 0.30       # ignored
+      enable_map_correction: false  # no per-source tagging or rebuild
+
+      extrinsic_T: [-0.011, -0.02329, 0.04412]
+      extrinsic_R: [1., 0., 0., 0., 1., 0., 0., 0., 1.]
+
+    lc:
+      enable: false                 # no loop closure pipeline at all
+      # remaining lc.* params ignored when enable=false; left here so the
+      # YAML structure matches outdoors.yaml for easy diffing
+      keyframe_every_scans: 10
+      keyframe_min_dist: 1.5
+      max_queue_size: 32
+      radius: 25.0
+      min_time_gap: 20.0
+      min_spacing: 5.0
+      icp_max_dist: 5.0
+      icp_fitness_thresh: 0.5
+      icp_max_iter: 30
+      max_rel_t_m: 8.0
+      odom_pos_sigma: 0.05
+      odom_rot_sigma: 0.01
+      lc_pos_sigma: 0.20
+      lc_rot_sigma: 0.05
+      use_crlb_edges: false
+      crlb_edge_min_sigma_pos: 0.02
+      crlb_edge_min_sigma_rot: 0.005
+      trigger_pos_m: 0.20
+      trigger_rot_rad: 0.02
+
+    publish:
+      path_en: true
+      effect_map_en: false
+      map_en: true
+      scan_publish_en: true
+      dense_publish_en: false
+      scan_bodyframe_pub_en: false
+      tf_en: true
+      vel_filter_alpha: 0.05
