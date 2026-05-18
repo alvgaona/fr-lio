@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// Copyright (c) 2025-2026 Alvaro J. Gaona <alvgaona@gmail.com>
+
 #include <rclcpp/rclcpp.hpp>
 #include <mocap4r2_msgs/msg/rigid_bodies.hpp>
 #include <nav_msgs/msg/odometry.hpp>

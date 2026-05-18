@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// Modifications Copyright (c) 2025-2026 Alvaro J. Gaona <alvgaona@gmail.com>
+// Derived from FAST-LIO2 (https://github.com/hku-mars/FAST_LIO),
+// Copyright (c) HKU MARS Lab.
+
 #ifndef USE_IKFOM_H
 #define USE_IKFOM_H
 

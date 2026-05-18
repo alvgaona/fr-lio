@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// Copyright (c) 2025-2026 Alvaro J. Gaona <alvgaona@gmail.com>
+
 #pragma once
 
 #include <atomic>
