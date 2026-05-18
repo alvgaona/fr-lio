@@ -6,6 +6,9 @@
 #ifndef COMMON_LIB_H
 #define COMMON_LIB_H
 
+#include <deque>
+#include <string>
+#include <vector>
 #include <so3_math.h>
 #include <Eigen/Eigen>
 #include <pcl/point_types.h>
