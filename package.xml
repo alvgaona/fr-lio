@@ -8,7 +8,7 @@
   <maintainer email="alvgaona@gmail.com">Alvaro J. Gaona</maintainer>
   <author email="alvgaona@gmail.com">Alvaro J. Gaona</author>
 
-  <license>GPL-v3.0</license>
+  <license>GPL-2.0-only</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
   <buildtool_depend>rosidl_default_generators</buildtool_depend>
