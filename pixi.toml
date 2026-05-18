@@ -1,0 +1,47 @@
+[workspace]
+authors = ["Alvaro J. Gaona <alvgaona@gmail.com>"]
+channels = ["conda-forge"]
+name = "fr_lio"
+platforms = ["osx-arm64", "linux-64", "linux-aarch64"]
+version = "0.1.0"
+
+[tasks]
+vcs-import = "mkdir -p deps && vcs import deps < deps.repos"
+build = "sh -c 'colcon build --base-paths . deps --packages-up-to fr_lio --merge-install --event-handlers console_direct+ --cmake-args -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DPython3_EXECUTABLE=$(which python) -DPython_EXECUTABLE=$(which python)'"
+test = "colcon test --packages-select fr_lio --merge-install --event-handlers console_direct+ && colcon test-result --verbose"
+clean = "rm -rf build install log deps"
+
+[dependencies]
+pkg-config = ">=0.29.2,<0.30"
+cmake = ">=4.2.1,<5"
+ninja = ">=1.13.2,<2"
+colcon-common-extensions = ">=0.3.0,<0.4"
+vcstool = "*"
+eigen = ">=3.4.0,<4"
+glog = ">=0.7.1,<0.8"
+gtsam = ">=4.2.0,<5"
+tbb-devel = "*"
+
+[feature.humble]
+channels = ["robostack-humble"]
+
+[feature.humble.dependencies]
+ros-humble-desktop = ">=0.10.0,<0.11"
+ros-humble-ament-cmake-auto = ">=1.3.12,<2"
+ros-humble-pcl-ros = ">=2.4.5,<3"
+ros-humble-mocap4r2-msgs = ">=0.0.5,<0.0.6"
+ros-humble-rosbag2-storage-mcap = ">=0.15.11,<0.16"
+
+[feature.jazzy]
+channels = ["robostack-jazzy"]
+
+[feature.jazzy.dependencies]
+ros-jazzy-desktop = ">=0.11.0,<0.12"
+ros-jazzy-ament-cmake-auto = ">=2.5.4,<3"
+ros-jazzy-pcl-ros = ">=2.4.5,<3"
+ros-jazzy-mocap4r2-msgs = ">=0.1.0,<0.2"
+ros-jazzy-rosbag2-storage-mcap = ">=0.26.7,<0.27"
+
+[environments]
+default = ["humble"]
+jazzy = ["jazzy"]

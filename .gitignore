@@ -1,4 +1,8 @@
 build
+install
+log
+deps
+.pixi
 Log/*.png
 Log/*.txt
 Log/*.csv
