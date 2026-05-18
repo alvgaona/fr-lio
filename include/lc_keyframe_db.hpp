@@ -27,7 +27,7 @@ struct LCKeyframe {
     // edge noise between kf_i and kf_j is derived from the cumulative
     // P_drift (kf_j) - P_drift (kf_i) — i.e. the drift that is expected
     // to have accumulated between the two visits. Units: 6x6 in
-    // (position, rotation) block order (matching laserMapping.cpp).
+    // (position, rotation) block order (matching laser_mapping.cpp).
     Eigen::Matrix<double, 6, 6> p_drift_snapshot =
         Eigen::Matrix<double, 6, 6>::Zero();
 };

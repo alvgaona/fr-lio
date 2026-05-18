@@ -405,7 +405,7 @@ def compute_scan_to_scan_covariance(points_body_curr, R_curr, t_curr,
     """Compute the Cramer-Rao Lower Bound on the relative pose covariance
     between the current scan and the previous one.
 
-    Mirrors the FAST-LIO implementation in laserMapping.cpp. Returns a 6x6
+    Mirrors the FAST-LIO implementation in laser_mapping.cpp. Returns a 6x6
     covariance matrix [position; rotation]. If there are not enough valid
     correspondences, returns a zero matrix.
 

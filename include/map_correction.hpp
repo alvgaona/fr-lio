@@ -131,7 +131,7 @@ inline int correct_map_core(
     // transform — replace, don't multiply. Correct multi-LC behavior
     // requires that shadow-map points are kept in the CURRENT map frame
     // between corrections (done by pre-transforming evictions through
-    // T_map_odom in points_cache_collect — see laserMapping.cpp).
+    // T_map_odom in points_cache_collect — see laser_mapping.cpp).
     T_map_odom_out = corrected_poses.back() * keyframe_poses_orig_inout.back().inverse();
     keyframe_poses_orig_inout = corrected_poses;
 

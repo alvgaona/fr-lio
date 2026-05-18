@@ -45,7 +45,7 @@
 #include <so3_math.h>
 #include <rclcpp/rclcpp.hpp>
 #include <Eigen/Core>
-#include "IMU_Processing.hpp"
+#include "imu_processing.hpp"
 #include <nav_msgs/msg/odometry.hpp>
 #include <nav_msgs/msg/path.hpp>
 #include <visualization_msgs/msg/marker.hpp>
@@ -2105,7 +2105,7 @@ private:
                 // diff approximates the drift that occurred BETWEEN kf_cand
                 // and kf_cur. GTSAM Pose3 noise order is (rot, trans).
                 // P_drift is stored in (pos, rot) block order per
-                // laserMapping.cpp, so swap blocks when converting.
+                // laser_mapping.cpp, so swap blocks when converting.
                 Eigen::Matrix<double, 6, 6> dP =
                     kf.p_drift_snapshot - cand.p_drift_snapshot;
                 Eigen::Vector3d pos_var = dP.block<3,3>(0,0).diagonal().cwiseMax(0.0);

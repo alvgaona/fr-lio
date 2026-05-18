@@ -9,7 +9,7 @@ geometry).
 Rationale: a pre-built fixed map is conceptually cleaner but the
 contribution (PCRB + health-aware inflation) is independent of whether the
 map is fixed or grown online. Sticking with the online map keeps the
-baseline filter behavior identical to what laserMapping.cpp does.
+baseline filter behavior identical to what laser_mapping.cpp does.
 
 Failure injection: outlier-flood and sensor-blockage windows to verify the
 health alphas catch failure modes and that P_drift grows in response.
