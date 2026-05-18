@@ -5,8 +5,6 @@
 
 #include "preprocess.h"
 
-#include <pcl/common/common.h>
-
 #define RETURN0 0x00
 #define RETURN0AND1 0x10
 

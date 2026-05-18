@@ -3,27 +3,16 @@
 // Derived from FAST-LIO2 (https://github.com/hku-mars/FAST_LIO),
 // Copyright (c) HKU MARS Lab.
 
-#include <cmath>
 #include <math.h>
 #include <deque>
-#include <mutex>
-#include <thread>
 #include <fstream>
-#include <csignal>
 #include <so3_math.h>
 #include <Eigen/Eigen>
+#include <rclcpp/rclcpp.hpp>
 #include <common_lib.h>
-#include <pcl/common/io.h>
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
-#include <condition_variable>
-#include <nav_msgs/msg/odometry.hpp>
-#include <pcl/common/transforms.h>
-#include <pcl/kdtree/kdtree_flann.h>
-#include <pcl_conversions/pcl_conversions.h>
 #include <sensor_msgs/msg/imu.hpp>
-#include <sensor_msgs/msg/point_cloud2.hpp>
-#include <geometry_msgs/msg/vector3.hpp>
 #include "use-ikfom.hpp"
 
 /// *************Preconfiguration

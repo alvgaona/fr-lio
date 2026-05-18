@@ -11,6 +11,7 @@
 #include <vector>
 #include <so3_math.h>
 #include <Eigen/Eigen>
+#include <rclcpp/rclcpp.hpp>
 #include <pcl/point_types.h>
 #include <pcl/point_cloud.h>
 #include <sensor_msgs/msg/imu.hpp>

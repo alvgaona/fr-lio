@@ -3,7 +3,6 @@
 
 #include <gtest/gtest.h>
 #include <Eigen/Geometry>
-#include <rclcpp/rclcpp.hpp>
 
 #include "map_correction.hpp"
 
