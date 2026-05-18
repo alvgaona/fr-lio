@@ -12,7 +12,7 @@ from launch_ros.parameter_descriptions import ParameterValue
 
 
 def generate_launch_description():
-    package_path = get_package_share_directory('fast_lio')
+    package_path = get_package_share_directory('fr_lio')
     default_config_path = os.path.join(package_path, 'config')
     default_rviz_config_path = os.path.join(
         package_path, 'rviz', 'fastlio.rviz')
@@ -56,7 +56,7 @@ def generate_launch_description():
     )
 
     lidar_accumulator_node = Node(
-        package='fast_lio',
+        package='fr_lio',
         executable='lidar_accumulator',
         namespace=namespace,
         parameters=[{
@@ -76,13 +76,13 @@ def generate_launch_description():
     #                '--z', '-0.12'],
     # )
 
-    def launch_fast_lio(context):
+    def launch_fr_lio(context):
         resolved_config = LaunchConfiguration('config_file').perform(context)
         resolved_config = os.path.abspath(resolved_config)
         resolved_ns = LaunchConfiguration('namespace').perform(context)
         resolved_sim_time = LaunchConfiguration('use_sim_time').perform(context)
         return [Node(
-            package='fast_lio',
+            package='fr_lio',
             executable='fastlio_mapping',
             namespace=resolved_ns,
             parameters=[resolved_config,
@@ -91,7 +91,7 @@ def generate_launch_description():
         )]
 
     mocap_converter_node = Node(
-        package='fast_lio',
+        package='fr_lio',
         executable='mocap_converter',
         namespace=namespace,
         parameters=[{
@@ -121,7 +121,7 @@ def generate_launch_description():
 
     ld.add_action(lidar_accumulator_node)
     # ld.add_action(livox_imu_to_base_link)
-    ld.add_action(OpaqueFunction(function=launch_fast_lio))
+    ld.add_action(OpaqueFunction(function=launch_fr_lio))
     ld.add_action(mocap_converter_node)
     ld.add_action(rviz_node)
 

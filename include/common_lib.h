@@ -10,7 +10,6 @@
 #include <Eigen/Eigen>
 #include <pcl/point_types.h>
 #include <pcl/point_cloud.h>
-#include <fast_lio/msg/pose6_d.hpp>
 #include <sensor_msgs/msg/imu.hpp>
 #include <nav_msgs/msg/odometry.hpp>
 
@@ -36,7 +35,16 @@ using namespace Eigen;
 #define STD_VEC_FROM_EIGEN(mat)  vector<decltype(mat)::Scalar> (mat.data(), mat.data() + mat.rows() * mat.cols())
 #define DEBUG_FILE_DIR(name)     (string(string(ROOT_DIR) + "Log/"+ name))
 
-typedef fast_lio::msg::Pose6D Pose6D;
+// In-memory IMU preintegration sample. Plain struct; not transmitted over ROS.
+struct Pose6D {
+    double offset_time;
+    double acc[3];
+    double gyr[3];
+    double vel[3];
+    double pos[3];
+    double rot[9];
+};
+
 typedef pcl::PointXYZINormal PointType;
 typedef pcl::PointCloud<PointType> PointCloudXYZI;
 typedef vector<PointType, Eigen::aligned_allocator<PointType>>  PointVector;

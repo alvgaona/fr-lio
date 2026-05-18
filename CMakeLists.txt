@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.8)
-project(fast_lio)
+project(fr_lio)
 
 if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release)
@@ -60,7 +60,6 @@ find_package(pcl_ros REQUIRED)
 find_package(pcl_conversions REQUIRED)
 find_package(livox_ros_driver2 REQUIRED)
 find_package(mocap4r2_msgs REQUIRED)
-find_package(rosidl_default_generators REQUIRED)
 
 set(dependencies
   rclcpp
@@ -93,15 +92,6 @@ endif()
 message(Eigen: ${EIGEN3_INCLUDE_DIR})
 message(STATUS "PCL: ${PCL_INCLUDE_DIRS}")
 
-set(msg_files
-  "msg/Pose6D.msg"
-)
-
-rosidl_generate_interfaces(${PROJECT_NAME}
-  ${msg_files}
-)
-ament_export_dependencies(rosidl_default_runtime)
-
 add_executable(fastlio_mapping src/laser_mapping.cpp include/ikd-Tree/ikd_Tree.cpp src/preprocess.cpp)
 target_include_directories(fastlio_mapping PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -110,18 +100,6 @@ target_include_directories(fastlio_mapping PUBLIC
 )
 target_link_libraries(fastlio_mapping ${PCL_LIBRARIES} ${PYTHON_LIBRARIES} Eigen3::Eigen gtsam TBB::tbb)
 target_include_directories(fastlio_mapping PRIVATE ${PYTHON_INCLUDE_DIRS})
-
-list(APPEND EOL_LIST "foxy" "galactic" "eloquent" "dashing" "crystal")
-
-if($ENV{ROS_DISTRO} IN_LIST EOL_LIST)
-  # Custommsg to support foxy & galactic
-  rosidl_target_interfaces(fastlio_mapping
-    ${PROJECT_NAME} "rosidl_typesupport_cpp")
-else()
-  rosidl_get_typesupport_target(cpp_typesupport_target
-    ${PROJECT_NAME} "rosidl_typesupport_cpp")
-  target_link_libraries(fastlio_mapping ${cpp_typesupport_target})
-endif()
 
 ament_target_dependencies(fastlio_mapping ${dependencies})
 
@@ -156,15 +134,6 @@ if(BUILD_TESTING)
   )
   target_link_libraries(test_map_correction ${PCL_LIBRARIES} ${PYTHON_LIBRARIES} Eigen3::Eigen)
   ament_target_dependencies(test_map_correction rclcpp sensor_msgs nav_msgs)
-
-  if($ENV{ROS_DISTRO} IN_LIST EOL_LIST)
-    rosidl_target_interfaces(test_map_correction
-      ${PROJECT_NAME} "rosidl_typesupport_cpp")
-  else()
-    rosidl_get_typesupport_target(cpp_typesupport_target
-      ${PROJECT_NAME} "rosidl_typesupport_cpp")
-    target_link_libraries(test_map_correction ${cpp_typesupport_target})
-  endif()
 endif()
 
 ament_package()
