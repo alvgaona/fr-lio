@@ -17,6 +17,8 @@ jobs:
         env: [default, jazzy]
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - uses: prefix-dev/setup-pixi@v0.9.4
         with:
