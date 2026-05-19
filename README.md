@@ -25,22 +25,29 @@ pixi run build        # colcon build (humble env by default)
 Run with the default indoor config and RViz:
 
 ```bash
-pixi shell
-source install/setup.bash
-ros2 launch fr_lio lio.launch.py
+pixi run ros2 launch fr_lio lio.launch.py
+```
+
+Replay a rosbag with mocap ground truth:
+
+```bash
+pixi run ros2 launch fr_lio lio.launch.py \
+  config_file:=config/indoors.yaml use_sim_time:=true mocap:=true
+# in a second terminal:
+pixi run ros2 bag play <bag-dir> --clock
 ```
 
 ### Common launch overrides
 
 ```bash
 # Switch to the outdoor profile
-ros2 launch fr_lio lio.launch.py config_file:=$(pwd)/config/outdoors.yaml
+pixi run ros2 launch fr_lio lio.launch.py config_file:=config/outdoors.yaml
 
 # Compare against mocap ground truth (publishes /ground_truth/odom + /path)
-ros2 launch fr_lio lio.launch.py mocap:=true rigid_body_name:=91
+pixi run ros2 launch fr_lio lio.launch.py mocap:=true rigid_body_name:=91
 
 # Headless run inside a namespace
-ros2 launch fr_lio lio.launch.py namespace:=drone1 rviz:=false
+pixi run ros2 launch fr_lio lio.launch.py namespace:=drone1 rviz:=false
 ```
 
 Use the `jazzy` pixi environment instead of the default humble:
