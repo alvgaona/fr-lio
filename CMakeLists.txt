@@ -93,16 +93,16 @@ endif()
 message(Eigen: ${EIGEN3_INCLUDE_DIR})
 message(STATUS "PCL: ${PCL_INCLUDE_DIRS}")
 
-add_executable(fastlio_mapping src/laser_mapping.cpp src/preprocess.cpp)
-target_include_directories(fastlio_mapping PUBLIC
+add_executable(frlio src/laser_mapping.cpp src/preprocess.cpp)
+target_include_directories(frlio PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
   ${PCL_INCLUDE_DIRS}
 )
-target_link_libraries(fastlio_mapping ${PCL_LIBRARIES} ${PYTHON_LIBRARIES} Eigen3::Eigen gtsam TBB::tbb ikd_tree::ikd_tree)
-target_include_directories(fastlio_mapping PRIVATE ${PYTHON_INCLUDE_DIRS})
+target_link_libraries(frlio ${PCL_LIBRARIES} ${PYTHON_LIBRARIES} Eigen3::Eigen gtsam TBB::tbb ikd_tree::ikd_tree)
+target_include_directories(frlio PRIVATE ${PYTHON_INCLUDE_DIRS})
 
-ament_target_dependencies(fastlio_mapping ${dependencies})
+ament_target_dependencies(frlio ${dependencies})
 
 add_executable(lidar_accumulator src/lidar_accumulator.cpp)
 target_link_libraries(lidar_accumulator Python3::Python)
@@ -113,7 +113,7 @@ target_link_libraries(mocap_converter Python3::Python)
 ament_target_dependencies(mocap_converter rclcpp nav_msgs geometry_msgs mocap4r2_msgs)
 
 # ---------------- Install --------------- #
-install(TARGETS fastlio_mapping lidar_accumulator mocap_converter
+install(TARGETS frlio lidar_accumulator mocap_converter
   DESTINATION lib/${PROJECT_NAME}
 )
 

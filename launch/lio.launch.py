@@ -83,7 +83,7 @@ def generate_launch_description():
         resolved_sim_time = LaunchConfiguration('use_sim_time').perform(context)
         return [Node(
             package='fr_lio',
-            executable='fastlio_mapping',
+            executable='frlio',
             namespace=resolved_ns,
             parameters=[resolved_config,
                         {'use_sim_time': resolved_sim_time == 'true'}],
