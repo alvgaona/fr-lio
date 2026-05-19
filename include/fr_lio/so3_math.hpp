@@ -3,10 +3,9 @@
 // Derived from FAST-LIO2 (https://github.com/hku-mars/FAST_LIO),
 // Copyright (c) HKU MARS Lab.
 
-#ifndef SO3_MATH_H
-#define SO3_MATH_H
+#pragma once
 
-#include <math.h>
+#include <cmath>
 #include <Eigen/Core>
 
 #define SKEW_SYM_MATRX(v) 0.0,-v[2],v[1],v[2],0.0,-v[0],-v[1],v[0],0.0
@@ -71,5 +70,3 @@ Eigen::Matrix<T,3,1> Log(const Eigen::Matrix<T, 3, 3> &R)
     Eigen::Matrix<T,3,1> K(R(2,1) - R(1,2), R(0,2) - R(2,0), R(1,0) - R(0,1));
     return (std::abs(theta) < 0.001) ? (0.5 * K) : (0.5 * theta / std::sin(theta) * K);
 }
-
-#endif

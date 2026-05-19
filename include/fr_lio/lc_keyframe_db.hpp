@@ -9,7 +9,7 @@
 #include <Eigen/Core>
 #include <Eigen/Geometry>
 #include <pcl/kdtree/kdtree_flann.h>
-#include "common_lib.h"
+#include <fr_lio/common_lib.hpp>
 
 /*
  * LCKeyframe — a pose + downsampled scan snapshot captured at specific

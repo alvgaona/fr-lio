@@ -3,13 +3,12 @@
 // Derived from FAST-LIO2 (https://github.com/hku-mars/FAST_LIO),
 // Copyright (c) HKU MARS Lab.
 
-#ifndef COMMON_LIB_H
-#define COMMON_LIB_H
+#pragma once
 
 #include <deque>
 #include <string>
 #include <vector>
-#include <so3_math.h>
+#include <fr_lio/so3_math.hpp>
 #include <Eigen/Eigen>
 #include <rclcpp/rclcpp.hpp>
 #include <pcl/point_types.h>
@@ -17,7 +16,6 @@
 #include <sensor_msgs/msg/imu.hpp>
 #include <nav_msgs/msg/odometry.hpp>
 
-using namespace std;
 using namespace Eigen;
 
 #define USE_IKFOM
@@ -36,8 +34,8 @@ using namespace Eigen;
 #define MAT_FROM_ARRAY(v)        v[0],v[1],v[2],v[3],v[4],v[5],v[6],v[7],v[8]
 #define CONSTRAIN(v,min,max)     ((v>min)?((v<max)?v:max):min)
 #define ARRAY_FROM_EIGEN(mat)    mat.data(), mat.data() + mat.rows() * mat.cols()
-#define STD_VEC_FROM_EIGEN(mat)  vector<decltype(mat)::Scalar> (mat.data(), mat.data() + mat.rows() * mat.cols())
-#define DEBUG_FILE_DIR(name)     (string(string(ROOT_DIR) + "Log/"+ name))
+#define STD_VEC_FROM_EIGEN(mat)  std::vector<decltype(mat)::Scalar> (mat.data(), mat.data() + mat.rows() * mat.cols())
+#define DEBUG_FILE_DIR(name)     (std::string(std::string(ROOT_DIR) + "Log/"+ name))
 
 // In-memory IMU preintegration sample. Plain struct; not transmitted over ROS.
 struct Pose6D {
@@ -51,7 +49,7 @@ struct Pose6D {
 
 typedef pcl::PointXYZINormal PointType;
 typedef pcl::PointCloud<PointType> PointCloudXYZI;
-typedef vector<PointType, Eigen::aligned_allocator<PointType>>  PointVector;
+typedef std::vector<PointType, Eigen::aligned_allocator<PointType>>  PointVector;
 typedef Vector3d V3D;
 typedef Matrix3d M3D;
 typedef Vector3f V3F;
@@ -62,10 +60,10 @@ typedef Matrix3f M3F;
 #define MF(a,b)  Matrix<float, (a), (b)>
 #define VF(a)    Matrix<float, (a), 1>
 
-M3D Eye3d(M3D::Identity());
-M3F Eye3f(M3F::Identity());
-V3D Zero3d(0, 0, 0);
-V3F Zero3f(0, 0, 0);
+inline M3D Eye3d(M3D::Identity());
+inline M3F Eye3f(M3F::Identity());
+inline V3D Zero3d(0, 0, 0);
+inline V3F Zero3f(0, 0, 0);
 
 struct MeasureGroup     // Lidar data and imu dates for the curent process
 {
@@ -77,7 +75,7 @@ struct MeasureGroup     // Lidar data and imu dates for the curent process
     double lidar_beg_time;
     double lidar_end_time;
     PointCloudXYZI::Ptr lidar;
-    deque<sensor_msgs::msg::Imu::ConstSharedPtr> imu;
+    std::deque<sensor_msgs::msg::Imu::ConstSharedPtr> imu;
 };
 
 struct StatesGroup
@@ -194,7 +192,7 @@ auto set_pose6d(const double t, const Matrix<T, 3, 1> &a, const Matrix<T, 3, 1> 
         rot_kp.pos[i] = p(i);
         for (int j = 0; j < 3; j++)  rot_kp.rot[i*3+j] = R(i,j);
     }
-    return move(rot_kp);
+    return rot_kp;
 }
 
 /* comment
@@ -232,7 +230,7 @@ bool esti_normvector(Matrix<T, 3, 1> &normvec, const PointVector &point, const T
     return true;
 }
 
-float calc_dist(PointType p1, PointType p2){
+inline float calc_dist(PointType p1, PointType p2){
     float d = (p1.x - p2.x) * (p1.x - p2.x) + (p1.y - p2.y) * (p1.y - p2.y) + (p1.z - p2.z) * (p1.z - p2.z);
     return d;
 }
@@ -295,17 +293,15 @@ inline Eigen::Matrix3d compute_neighborhood_cov(const PointVector &neighbors)
     return cov / static_cast<double>(n - 1);
 }
 
-double get_time_sec(const builtin_interfaces::msg::Time &time)
+inline double get_time_sec(const builtin_interfaces::msg::Time &time)
 {
     return rclcpp::Time(time).seconds();
 }
 
-rclcpp::Time get_ros_time(double timestamp)
+inline rclcpp::Time get_ros_time(double timestamp)
 {
     int32_t sec = std::floor(timestamp);
     auto nanosec_d = (timestamp - std::floor(timestamp)) * 1e9;
     uint32_t nanosec = nanosec_d;
     return rclcpp::Time(sec, nanosec);
 }
-
-#endif

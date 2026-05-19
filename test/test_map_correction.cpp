@@ -4,7 +4,7 @@
 #include <gtest/gtest.h>
 #include <Eigen/Geometry>
 
-#include "map_correction.hpp"
+#include <fr_lio/map_correction.hpp>
 
 namespace {
 

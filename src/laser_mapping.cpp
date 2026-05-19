@@ -40,13 +40,13 @@
 
 #include <omp.h>
 #include <mutex>
-#include <math.h>
+#include <cmath>
 #include <thread>
 #include <unordered_set>
 #include <fstream>
 #include <csignal>
 #include <chrono>
-#include <so3_math.h>
+#include <fr_lio/so3_math.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <Eigen/Core>
 #include "imu_processing.hpp"
@@ -69,11 +69,13 @@
 #include <tf2_ros/transform_broadcaster.h>
 #include <geometry_msgs/msg/transform_stamped.hpp>
 #include <livox_ros_driver2/msg/custom_msg.hpp>
-#include "preprocess.h"
+#include "preprocess.hpp"
 #include <ikd_tree/ikd_tree.h>
-#include "map_correction.hpp"
-#include "lc_keyframe_db.hpp"
-#include "lc_worker.hpp"
+#include <fr_lio/map_correction.hpp>
+#include <fr_lio/lc_keyframe_db.hpp>
+#include <fr_lio/lc_worker.hpp>
+
+using namespace std;
 
 #define INIT_TIME           (0.1)
 #define LASER_POINT_COV     (0.001)

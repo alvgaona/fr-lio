@@ -3,7 +3,9 @@
 // Derived from FAST-LIO2 (https://github.com/hku-mars/FAST_LIO),
 // Copyright (c) HKU MARS Lab.
 
-#include "preprocess.h"
+#include "preprocess.hpp"
+
+using namespace std;
 
 #define RETURN0 0x00
 #define RETURN0AND1 0x10

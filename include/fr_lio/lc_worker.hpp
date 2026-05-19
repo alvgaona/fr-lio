@@ -12,7 +12,7 @@
 #include <mutex>
 #include <thread>
 
-#include "lc_keyframe_db.hpp"
+#include <fr_lio/lc_keyframe_db.hpp>
 
 /*
  * LCWorker — bounded-queue background thread that consumes LCKeyframe

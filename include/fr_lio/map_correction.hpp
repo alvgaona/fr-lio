@@ -9,7 +9,7 @@
 #include <vector>
 #include <Eigen/Core>
 #include <Eigen/Geometry>
-#include "common_lib.h"
+#include <fr_lio/common_lib.hpp>
 #include <ikd_tree/ikd_tree.h>
 
 /*
