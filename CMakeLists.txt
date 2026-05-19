@@ -80,6 +80,7 @@ find_package(Eigen3 REQUIRED)
 find_package(PCL REQUIRED COMPONENTS common io)
 find_package(TBB REQUIRED)
 find_package(GTSAM REQUIRED)
+find_package(ikd_tree REQUIRED)
 # GTSAM's exported CMake target may add a bare -ltbb that the macOS/conda
 # toolchain can't resolve without an explicit link directory. Add the pixi
 # env's lib dir so `-ltbb` finds libtbb.dylib.
@@ -92,13 +93,13 @@ endif()
 message(Eigen: ${EIGEN3_INCLUDE_DIR})
 message(STATUS "PCL: ${PCL_INCLUDE_DIRS}")
 
-add_executable(fastlio_mapping src/laser_mapping.cpp include/ikd-Tree/ikd_Tree.cpp src/preprocess.cpp)
+add_executable(fastlio_mapping src/laser_mapping.cpp src/preprocess.cpp)
 target_include_directories(fastlio_mapping PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
   ${PCL_INCLUDE_DIRS}
 )
-target_link_libraries(fastlio_mapping ${PCL_LIBRARIES} ${PYTHON_LIBRARIES} Eigen3::Eigen gtsam TBB::tbb)
+target_link_libraries(fastlio_mapping ${PCL_LIBRARIES} ${PYTHON_LIBRARIES} Eigen3::Eigen gtsam TBB::tbb ikd_tree::ikd_tree)
 target_include_directories(fastlio_mapping PRIVATE ${PYTHON_INCLUDE_DIRS})
 
 ament_target_dependencies(fastlio_mapping ${dependencies})
@@ -132,7 +133,7 @@ if(BUILD_TESTING)
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     ${PCL_INCLUDE_DIRS}
   )
-  target_link_libraries(test_map_correction ${PCL_LIBRARIES} ${PYTHON_LIBRARIES} Eigen3::Eigen)
+  target_link_libraries(test_map_correction ${PCL_LIBRARIES} ${PYTHON_LIBRARIES} Eigen3::Eigen ikd_tree::ikd_tree)
   ament_target_dependencies(test_map_correction rclcpp sensor_msgs nav_msgs)
 endif()
 

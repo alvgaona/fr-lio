@@ -1,6 +1,6 @@
 [workspace]
 authors = ["Alvaro J. Gaona <alvgaona@gmail.com>"]
-channels = ["conda-forge"]
+channels = ["https://prefix.dev/ikd-tree", "conda-forge"]
 name = "fr_lio"
 platforms = ["osx-arm64", "linux-64", "linux-aarch64"]
 version = "0.1.0"
@@ -21,6 +21,7 @@ eigen = ">=3.4.0,<4"
 glog = ">=0.7.1,<0.8"
 gtsam = ">=4.2.0,<5"
 tbb-devel = "*"
+ikd-tree = ">=0.1.0,<0.2"
 
 [feature.humble]
 channels = ["robostack-humble"]
