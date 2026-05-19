@@ -1,2 +1,13 @@
+# Line-ending normalization: store as LF in the repo regardless of
+# what the working tree uses. text=auto lets Git detect text vs binary.
+* text=auto eol=lf
+
+# Binary files (Git usually auto-detects, but be explicit).
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.pdf  binary
+
 # SCM syntax highlighting & preventing 3-way merges
 pixi.lock merge=binary linguist-language=YAML linguist-generated=true -diff
