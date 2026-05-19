@@ -3,6 +3,7 @@ install
 log
 deps
 .pixi
+.cache
 Log/*.png
 Log/*.txt
 Log/*.csv
