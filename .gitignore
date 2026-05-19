@@ -4,12 +4,9 @@ log
 deps
 .pixi
 .cache
-Log/*.png
 Log/*.txt
 Log/*.csv
-Log/*.pdf
 .vscode/c_cpp_properties.json
 .vscode/settings.json
-PCD/*.pcd
 .DS_Store
 scripts/sim_data/
