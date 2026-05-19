@@ -70,7 +70,7 @@
 #include <geometry_msgs/msg/transform_stamped.hpp>
 #include <livox_ros_driver2/msg/custom_msg.hpp>
 #include "preprocess.h"
-#include <ikd-Tree/ikd_Tree.h>
+#include <ikd_tree/ikd_tree.h>
 #include "map_correction.hpp"
 #include "lc_keyframe_db.hpp"
 #include "lc_worker.hpp"
@@ -146,7 +146,7 @@ bool   scan_pub_en = false, dense_pub_en = false, scan_body_pub_en = false;
 bool    is_first_lidar = true;
 
 vector<vector<int>>  pointSearchInd_surf;
-vector<BoxPointType> cub_needrm;
+vector<ikd_tree::BoxPointType> cub_needrm;
 vector<PointVector>  Nearest_Points;
 vector<double>       extrinT(3, 0.0);
 vector<double>       extrinR(9, 0.0);
@@ -166,12 +166,12 @@ PointCloudXYZI::Ptr _featsArray;
 pcl::VoxelGrid<PointType> downSizeFilterSurf;
 pcl::VoxelGrid<PointType> downSizeFilterMap;
 
-KD_TREE<PointType> ikdtree;
+ikd_tree::KdTree<PointType> ikdtree(0.5f, 0.6f, 0.2f);
 
 /* Shadow global map — preserves points evicted from the working tree via
    voxel-deduplicated absorption. Gated by mapping.enable_shadow_map.
    Voxel key and shadow_voxel_key live in map_correction.hpp. */
-KD_TREE<PointType> global_ikdtree;
+ikd_tree::KdTree<PointType> global_ikdtree(0.5f, 0.6f, 0.2f);
 std::unordered_set<VoxelKey, VoxelKeyHash> global_voxel_set;
 std::mutex mtx_global_map;
 bool use_shadow_map = false;
@@ -464,10 +464,10 @@ int correct_map(const std::vector<Eigen::Isometry3d>& corrected_poses)
         {
             std::lock_guard<std::mutex> lock(mtx_ikdtree);
             PointVector live_points;
-            ikdtree.flatten(ikdtree.Root_Node, live_points, NOT_RECORD);
+            ikdtree.flatten(live_points);
             n_working = transform_points_by_source_delta(live_points, deltas);
             if (!live_points.empty()) {
-                ikdtree.Build(live_points);
+                ikdtree.build(live_points);
             }
         }
         double t_ms = (omp_get_wtime() - t_start) * 1000.0;
@@ -521,10 +521,10 @@ void points_cache_collect()
             }
         }
         if (!to_insert.empty()) {
-            if (global_ikdtree.Root_Node == nullptr) {
-                global_ikdtree.Build(to_insert);
+            if (global_ikdtree.size() == 0) {
+                global_ikdtree.build(to_insert);
             } else {
-                global_ikdtree.Add_Points(to_insert, false);
+                global_ikdtree.add_points(to_insert, false);
             }
         }
     }
@@ -542,7 +542,7 @@ void points_cache_collect()
         ikdtree.validnum(), shadow_now);
 }
 
-BoxPointType LocalMap_Points;
+ikd_tree::BoxPointType LocalMap_Points;
 bool Localmap_Initialized = false;
 void lasermap_fov_segment()
 {
@@ -576,7 +576,7 @@ void lasermap_fov_segment()
             need_move ? 1 : 0);
     }
     if (!need_move) return;
-    BoxPointType New_LocalMap_Points, tmp_boxpoints;
+    ikd_tree::BoxPointType New_LocalMap_Points, tmp_boxpoints;
     New_LocalMap_Points = LocalMap_Points;
     float mov_dist = max((cube_len - 2.0 * MOV_THRESHOLD * DET_RANGE) * 0.5 * 0.9, double(DET_RANGE * (MOV_THRESHOLD -1)));
     for (int i = 0; i < 3; i++){
@@ -599,7 +599,7 @@ void lasermap_fov_segment()
     double delete_begin = omp_get_wtime();
     if (cub_needrm.size() > 0) {
         std::lock_guard<std::mutex> lock(mtx_ikdtree);
-        kdtree_delete_counter = ikdtree.Delete_Point_Boxes(cub_needrm);
+        kdtree_delete_counter = ikdtree.delete_point_boxes(cub_needrm);
     }
     kdtree_delete_time = omp_get_wtime() - delete_begin;
 }
@@ -950,7 +950,7 @@ void map_incremental()
         {
             const PointVector &points_near = Nearest_Points[i];
             bool need_add = true;
-            BoxPointType Box_of_Point;
+            ikd_tree::BoxPointType Box_of_Point;
             PointType downsample_result, mid_point;
             mid_point.x = floor(feats_down_world->points[i].x/filter_size_map_min)*filter_size_map_min + 0.5 * filter_size_map_min;
             mid_point.y = floor(feats_down_world->points[i].y/filter_size_map_min)*filter_size_map_min + 0.5 * filter_size_map_min;
@@ -980,8 +980,8 @@ void map_incremental()
     double st_time = omp_get_wtime();
     {
         std::lock_guard<std::mutex> lock(mtx_ikdtree);
-        add_point_size = ikdtree.Add_Points(PointToAdd, true);
-        ikdtree.Add_Points(PointNoNeedDownsample, false);
+        add_point_size = ikdtree.add_points(PointToAdd, true);
+        ikdtree.add_points(PointNoNeedDownsample, false);
     }
     add_point_size = PointToAdd.size() + PointNoNeedDownsample.size();
     kdtree_incremental_time = omp_get_wtime() - st_time;
@@ -1040,7 +1040,7 @@ void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_
         if (ekfom_data.converge)
         {
             /** Find the closest surfaces in the map **/
-            ikdtree.Nearest_Search(point_world, NUM_MATCH_POINTS, points_near, pointSearchSqDis);
+            ikdtree.nearest_search(point_world, NUM_MATCH_POINTS, points_near, pointSearchSqDis);
             point_selected_surf[i] = points_near.size() < NUM_MATCH_POINTS ? false : pointSearchSqDis[NUM_MATCH_POINTS - 1] > 5 ? false : true;
         }
 
@@ -1663,7 +1663,7 @@ private:
             t1 = omp_get_wtime();
             feats_down_size = feats_down_body->points.size();
             /*** initialize the map kdtree ***/
-            if(ikdtree.Root_Node == nullptr)
+            if (ikdtree.size() == 0)
             {
                 RCLCPP_INFO(this->get_logger(), "Initialize the map kdtree");
                 if(feats_down_size > 5)
@@ -1674,7 +1674,7 @@ private:
                     {
                         pointBodyToWorld(&(feats_down_body->points[i]), &(feats_down_world->points[i]));
                     }
-                    ikdtree.Build(feats_down_world->points);
+                    ikdtree.build(feats_down_world->points);
                     if (use_shadow_map) {
                         global_ikdtree.set_downsample_param(filter_size_map_min);
                     }
@@ -1702,10 +1702,10 @@ private:
 
             if(0) // If you need to see map point, change to "if(1)"
             {
-                PointVector ().swap(ikdtree.PCL_Storage);
-                ikdtree.flatten(ikdtree.Root_Node, ikdtree.PCL_Storage, NOT_RECORD);
+                PointVector storage;
+                ikdtree.flatten(storage);
                 featsFromMap->clear();
-                featsFromMap->points = ikdtree.PCL_Storage;
+                featsFromMap->points = storage;
             }
 
             pointSearchInd_surf.resize(feats_down_size);
@@ -2264,7 +2264,7 @@ private:
         PointVector all_points;
         {
             std::lock_guard<std::mutex> lock(mtx_global_map);
-            global_ikdtree.flatten(global_ikdtree.Root_Node, all_points, NOT_RECORD);
+            global_ikdtree.flatten(all_points);
         }
         // When the working-tree correction is on, the live ikd-Tree holds the
         // authoritative deformed geometry — especially in no-eviction
@@ -2273,7 +2273,7 @@ private:
         if (correct_working_tree) {
             std::lock_guard<std::mutex> lock(mtx_ikdtree);
             PointVector live;
-            ikdtree.flatten(ikdtree.Root_Node, live, NOT_RECORD);
+            ikdtree.flatten(live);
             all_points.insert(all_points.end(), live.begin(), live.end());
         }
         publish_cloud_corrected_(pubCloudMapCorrected_, frame_prefix_ + map_frame_, stamp, all_points);
@@ -2289,7 +2289,7 @@ private:
         PointVector all_points;
         {
             std::lock_guard<std::mutex> lock(mtx_global_map);
-            global_ikdtree.flatten(global_ikdtree.Root_Node, all_points, NOT_RECORD);
+            global_ikdtree.flatten(all_points);
         }
         if (all_points.empty()) return;
         PointCloudXYZI::Ptr cloud(new PointCloudXYZI());

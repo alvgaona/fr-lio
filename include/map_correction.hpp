@@ -10,7 +10,7 @@
 #include <Eigen/Core>
 #include <Eigen/Geometry>
 #include "common_lib.h"
-#include "ikd-Tree/ikd_Tree.h"
+#include <ikd_tree/ikd_tree.h>
 
 /*
  * Shadow-map voxel dedup key: exact 3-int32 coordinate tuple, cheap hash.
@@ -104,7 +104,7 @@ inline std::vector<Eigen::Isometry3d> compute_keyframe_deltas(
 inline int correct_map_core(
     const std::vector<Eigen::Isometry3d>& corrected_poses,
     std::vector<Eigen::Isometry3d>& keyframe_poses_orig_inout,
-    KD_TREE<PointType>& tree,
+    ikd_tree::KdTree<PointType>& tree,
     std::unordered_set<VoxelKey, VoxelKeyHash>& voxel_set,
     double voxel_size,
     Eigen::Isometry3d& T_map_odom_out)
@@ -115,7 +115,7 @@ inline int correct_map_core(
     auto deltas = compute_keyframe_deltas(corrected_poses, keyframe_poses_orig_inout);
 
     PointVector all_points;
-    tree.flatten(tree.Root_Node, all_points, NOT_RECORD);
+    tree.flatten(all_points);
     transform_points_by_source_delta(all_points, deltas);
 
     voxel_set.clear();
@@ -124,7 +124,7 @@ inline int correct_map_core(
     }
 
     if (!all_points.empty()) {
-        tree.Build(all_points);
+        tree.build(all_points);
     }
 
     // T_map_odom is the transform that takes the filter's current (live
